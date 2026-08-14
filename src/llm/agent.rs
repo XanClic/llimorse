@@ -10,8 +10,9 @@ use anyhow::{Result, anyhow, bail};
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
 use pin_project::pin_project;
-use schemars::{JsonSchema, schema_for};
+use schemars::{JsonSchema, Schema};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -29,6 +30,45 @@ pub struct Agent {
 
     /// Current token usage
     token_usage: TokenUsage,
+
+    /// Available tools
+    tools: HashMap<String, Box<dyn Tool>>,
+
+    /// Tool definition as passed to the LLM
+    tool_definitions: Vec<ToolDefinition>,
+}
+
+/// Tool available to an agent.
+///
+/// This trait is what is needed by [`Agent`] to use a tool.
+pub trait Tool {
+    /// Tool name
+    fn name(&self) -> String;
+
+    /// Tool description, if any
+    fn description(&self) -> Option<String>;
+
+    /// Tool arguments JSON schema
+    fn schema(&self) -> Schema;
+
+    /// Execute this tool, arguments given in JSON format (unparsed)
+    fn execute_unparsed(&self, arguments: String) -> Result<String>;
+}
+
+/// Connects a tool to its parameter type.
+///
+/// This exists so [`CallableTool`] is forced to use the correct type (when using the
+/// [`tool!`](super::tool) macro).  It is separete from [`CallableTool`] because the macro
+/// implements this, and the user implements the latter.
+pub trait ToolState {
+    /// Associated parameter type.
+    type ParamType: for<'a> Deserialize<'a> + JsonSchema;
+}
+
+/// User-defined trait for a tool.
+pub trait CallableTool: ToolState {
+    /// Execute a tool call.
+    fn execute(&self, arguments: <Self as ToolState>::ParamType) -> Result<String>;
 }
 
 /// Requested currently being executed by the LLM.
@@ -45,14 +85,6 @@ pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     terminated: bool,
 }
 
-/// Test tool
-#[derive(Deserialize, JsonSchema)]
-struct HelloTool {
-    /// Use this for an extra special tag line between friendly colleagues!
-    #[allow(unused)]
-    tagline: String,
-}
-
 impl Agent {
     /// Create a new agent harness around the given [`Client`].
     pub fn new(client: Client) -> Self {
@@ -61,6 +93,8 @@ impl Agent {
             history: Vec::new(),
             pending_calls: Vec::new(),
             token_usage: Default::default(),
+            tools: HashMap::new(),
+            tool_definitions: Vec::new(),
         }
     }
 
@@ -79,6 +113,21 @@ impl Agent {
         self.push(UserMessage::from(message.into()))
     }
 
+    /// Add the given tool, with the given state, to the agent.
+    pub fn add_tool<T: Tool + 'static>(&mut self, state: T) {
+        let definition = ToolDefinition::Function {
+            function: FunctionDefinition {
+                name: state.name(),
+                description: state.description(),
+                parameters: Some(state.schema()),
+                strict: true,
+            },
+        };
+
+        self.tools.insert(state.name(), Box::new(state));
+        self.tool_definitions.push(definition);
+    }
+
     /// Submit the current chat history.
     ///
     /// This includes pending tool call results (from [`Agent::execute_pending_calls()`]) and user
@@ -86,20 +135,9 @@ impl Agent {
     pub async fn submit(
         &mut self,
     ) -> Result<AgentRunning<'_, impl Stream<Item = reqwest::Result<bytes::Bytes>>>> {
-        let tool = ToolDefinition::Function {
-            function: FunctionDefinition {
-                name: "hello".into(),
-                description: Some(
-                    "Make the initial greeting to the user extra special! Use this to be super friendly.".into(),
-                ),
-                parameters: Some(schema_for!(HelloTool)),
-                strict: true,
-            },
-        };
-
         let streaming = {
             self.client
-                .chat_stream(&self.history, &[tool], ToolChoiceMode::Auto)
+                .chat_stream(&self.history, &self.tool_definitions, ToolChoiceMode::Auto)
                 .await?
         };
 
@@ -148,18 +186,14 @@ impl Agent {
     /// properly formats them for the LLM.
     async fn do_execute_call(&self, tool_call: ToolCallParams) -> Result<String> {
         match tool_call {
-            ToolCallParams::Function { function } => match function.name.as_str() {
-                "hello" => {
-                    let params: HelloTool = serde_json::from_str(&function.arguments)?;
-                    eprintln!(
-                        "\n\x1b[31;1mA super special hello from the LLM: {}\x1b[0m\n",
-                        params.tagline
-                    );
-                    Ok("Got it!".into())
-                }
+            ToolCallParams::Function { function } => {
+                let state = self
+                    .tools
+                    .get(function.name.as_str())
+                    .ok_or_else(|| anyhow!("No such function: {}", function.name))?;
 
-                _ => bail!("No such function: {}", function.name),
-            },
+                state.execute_unparsed(function.arguments)
+            }
 
             ToolCallParams::Custom { custom } => bail!("No such tool: {}", custom.name),
         }

@@ -4,6 +4,7 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 mod llm;
+mod tools;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser};
@@ -77,6 +78,8 @@ async fn main() -> Result<()> {
 
     let llm = llm::Client::new(&args.llama_url);
     let mut agent = llm::Agent::new(llm);
+
+    agent.add_tool(tools::HelloTool::default());
 
     agent.push_system("Who’s a friendly work buddy? You’re a friendly work buddy!");
 
