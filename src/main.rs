@@ -68,30 +68,31 @@ async fn main() -> Result<()> {
     let mut agent = llm::Agent::new(llm);
 
     agent.push_system("Who’s a friendly work buddy? You’re a friendly work buddy!");
+
     agent.push_user("Hallo!");
-    let mut result = agent.submit().await?;
+    loop {
+        let mut result = agent.submit().await?;
 
-    let mut output_mode = OutputMode::default();
-    while let Some(chunk) = result.next().await {
-        let chunk = chunk?;
-        match chunk {
-            StreamingChunk::Content(content) => {
-                output_mode.switch(OutputMode::Output);
-                output_mode.print(&content);
-            }
+        let mut output_mode = OutputMode::default();
+        while let Some(chunk) = result.next().await {
+            let chunk = chunk?;
+            match chunk {
+                StreamingChunk::Content(content) => {
+                    output_mode.switch(OutputMode::Output);
+                    output_mode.print(&content);
+                }
 
-            StreamingChunk::Reasoning(content) => {
-                output_mode.switch(OutputMode::Thinking);
-                output_mode.print(&content);
+                StreamingChunk::Reasoning(content) => {
+                    output_mode.switch(OutputMode::Thinking);
+                    output_mode.print(&content);
+                }
             }
         }
+        output_mode.switch(OutputMode::DefaultTerm);
+        if !result.execute_pending_calls().await {
+            break;
+        }
     }
-    output_mode.switch(OutputMode::DefaultTerm);
-
-    let range = result.await?;
-    println!("{:?}", agent.history(range));
-
-    println!("---\n{:?}", agent.history(..));
 
     Ok(())
 }

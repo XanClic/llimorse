@@ -561,8 +561,12 @@ impl StreamingObject for StreamingToolCallParams {
 
     fn finalize(self) -> Result<ToolCallParams> {
         Ok(match self {
-            StreamingToolCallParams::Function(sfc) => ToolCallParams::Function(sfc.finalize()?),
-            StreamingToolCallParams::Custom(sctc) => ToolCallParams::Custom(sctc.finalize()?),
+            StreamingToolCallParams::Function(sfc) => ToolCallParams::Function {
+                function: sfc.finalize()?,
+            },
+            StreamingToolCallParams::Custom(sctc) => ToolCallParams::Custom {
+                custom: sctc.finalize()?,
+            },
         })
     }
 }

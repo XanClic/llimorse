@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use anyhow::Result;
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
 
@@ -70,10 +71,10 @@ pub struct ToolCall {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolCallParams {
     /// Function tool call
-    Function(FunctionCall),
+    Function { function: FunctionCall },
 
     /// Custom tool call
-    Custom(CustomCall),
+    Custom { custom: CustomCall },
 }
 
 /// Request a function tool call
@@ -313,6 +314,20 @@ impl From<String> for SystemMessage {
 impl From<String> for UserMessage {
     fn from(message: String) -> Self {
         UserMessage { content: message }
+    }
+}
+
+impl ToolResult {
+    pub fn new(call_id: String, result: Result<String>) -> Self {
+        let content = match result {
+            Ok(result) => result,
+            Err(err) => format!("TOOL CALL FAILED: {err}"),
+        };
+
+        ToolResult {
+            tool_call_id: Some(call_id),
+            content,
+        }
     }
 }
 
