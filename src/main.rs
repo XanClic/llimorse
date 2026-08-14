@@ -1,3 +1,8 @@
+//! A very nice work buddy, taking care of your tickets for you. More or less.
+
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+
 mod llm;
 
 use anyhow::Result;
@@ -34,11 +39,17 @@ fn tagline() -> &'static str {
     TAGLINES[fastrand::usize(..TAGLINES.len())]
 }
 
+/// Tracks which mode we are in wrt the LLM output (to allow switching terminal colors).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum OutputMode {
+    /// Default mode (CSI 0m)
     #[default]
     DefaultTerm,
+
+    /// Proper LLM output
     Output,
+
+    /// Reasoning content
     Thinking,
 }
 
@@ -98,6 +109,9 @@ async fn main() -> Result<()> {
 }
 
 impl OutputMode {
+    /// Switch the currently active output mode.
+    ///
+    /// Internally checks whether `self == to`, so the caller does not need to do that.
     fn switch(&mut self, to: Self) {
         if *self == to {
             return;
@@ -117,6 +131,7 @@ impl OutputMode {
         *self = to;
     }
 
+    /// Writes `message` out.
     fn print(&self, message: &str) {
         print!("{message}");
         let _ = io::stdout().flush();

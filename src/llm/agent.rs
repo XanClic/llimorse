@@ -31,14 +31,21 @@ pub struct Agent {
     token_usage: TokenUsage,
 }
 
+/// Requested currently being executed by the LLM.
 #[pin_project(project = AgentRunningProjection)]
 pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
+    /// The results as it is begin generated
     #[pin]
     streaming: StreamingResult<S>,
+
+    /// Reference to the [`Agent`] object to push back the results
     agent: &'a mut Agent,
+
+    /// Whether the request is done
     terminated: bool,
 }
 
+/// Test tool
 #[derive(Deserialize, JsonSchema)]
 struct HelloTool {
     /// Use this for an extra special tag line between friendly colleagues!
@@ -47,6 +54,7 @@ struct HelloTool {
 }
 
 impl Agent {
+    /// Create a new agent harness around the given [`Client`].
     pub fn new(client: Client) -> Self {
         Agent {
             client,
@@ -56,18 +64,25 @@ impl Agent {
         }
     }
 
+    /// Push the given message on top of the chat history.
     pub fn push(&mut self, message: impl Into<ChatMessage>) {
         self.history.push(message.into());
     }
 
+    /// Push the given system-level message on top of the chat history.
     pub fn push_system(&mut self, message: impl Into<String>) {
         self.push(SystemMessage::from(message.into()))
     }
 
+    /// Push the given user message on top of the chat history.
     pub fn push_user(&mut self, message: impl Into<String>) {
         self.push(UserMessage::from(message.into()))
     }
 
+    /// Submit the current chat history.
+    ///
+    /// This includes pending tool call results (from [`Agent::execute_pending_calls()`]) and user
+    /// messages.
     pub async fn submit(
         &mut self,
     ) -> Result<AgentRunning<'_, impl Stream<Item = reqwest::Result<bytes::Bytes>>>> {
@@ -157,12 +172,20 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'_, S> {
     /// The problem is that [`AgentRunning`] retains a reference to [`Agent`] while it lives, so
     /// without dropping it, [`Agent::execute_pending_calls()`] cannot be run.  This function plugs
     /// that gap, doing both (dropping and executing the calls).
+    ///
+    /// Must only be called after the request has run its course, with success.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`AgentRunning::terminated`] is false.
     pub async fn execute_pending_calls(self) -> bool {
+        assert!(self.terminated);
         self.agent.execute_pending_calls().await
     }
 }
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunningProjection<'_, '_, S> {
+    /// Mark the stream as terminated.
     fn terminate(&mut self) {
         *self.terminated = true;
     }

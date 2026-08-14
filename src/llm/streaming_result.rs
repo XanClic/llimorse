@@ -335,6 +335,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedFuture for StreamingR
     }
 }
 
+/// Stream that splits a byte stream by newline characters.
 #[pin_project(project = NewlineSplitProjection)]
 struct NewlineSplit<S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     /// Source stream

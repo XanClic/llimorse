@@ -71,10 +71,16 @@ pub struct ToolCall {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolCallParams {
     /// Function tool call
-    Function { function: FunctionCall },
+    Function {
+        /// Tool name and arguments
+        function: FunctionCall,
+    },
 
     /// Custom tool call
-    Custom { custom: CustomCall },
+    Custom {
+        /// Tool name and input
+        custom: CustomCall,
+    },
 }
 
 /// Request a function tool call
@@ -147,10 +153,16 @@ pub struct StreamOptions {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolDefinition {
     /// A function tool generating responses
-    Function { function: FunctionDefinition },
+    Function {
+        /// Function definition
+        function: FunctionDefinition,
+    },
 
     /// A custom tool processing input
-    Custom { custom: CustomToolDefinition },
+    Custom {
+        /// Tool definition
+        custom: CustomToolDefinition,
+    },
 }
 
 /// Function definition
@@ -264,12 +276,14 @@ pub enum ToolChoiceSet<'a> {
 /// References a function
 #[derive(Clone, Debug, Serialize)]
 pub struct FunctionReference<'a> {
+    /// Function name
     pub function: &'a str,
 }
 
 /// References a custom tool
 #[derive(Clone, Debug, Serialize)]
 pub struct CustomReference<'a> {
+    /// Tool name
     pub custom: &'a str,
 }
 
@@ -277,7 +291,10 @@ pub struct CustomReference<'a> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ToolReference<'a> {
+    /// Function tool
     Function(FunctionReference<'a>),
+
+    /// Custom tool
     Custom(CustomReference<'a>),
 }
 
@@ -318,6 +335,7 @@ impl From<String> for UserMessage {
 }
 
 impl ToolResult {
+    /// Create a tool result for `call_id`.
     pub fn new(call_id: String, result: Result<String>) -> Self {
         let content = match result {
             Ok(result) => result,

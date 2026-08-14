@@ -18,6 +18,7 @@ pub struct Client {
 }
 
 impl Client {
+    /// Connect to the given `base_url` llama-server instance.
     pub fn new(base_url: &str) -> Self {
         Client {
             http: reqwest::Client::builder()
@@ -55,6 +56,9 @@ impl Client {
         Ok(response.bytes_stream().into())
     }
 
+    /// Request completion of the given `request` from the LLM.
+    ///
+    /// Retry benign errors `max_attempts` times.
     async fn submit_request(
         &self,
         request: ChatCompletion<'_>,
