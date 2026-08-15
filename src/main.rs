@@ -28,7 +28,7 @@ struct Args {
     debug: bool,
 }
 
-/// Random a random “witty” tag line for --help
+/// Return a random “witty” tag line for --help
 fn tagline() -> &'static str {
     const TAGLINES: [&str; 4] = [
         "because someone has to care about your tickets, and it won’t be you",

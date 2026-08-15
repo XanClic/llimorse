@@ -58,7 +58,7 @@ pub trait Tool {
 /// Connects a tool to its parameter type.
 ///
 /// This exists so [`CallableTool`] is forced to use the correct type (when using the
-/// [`tool!`](super::tool) macro).  It is separete from [`CallableTool`] because the macro
+/// [`tool!`](super::tool) macro).  It is separate from [`CallableTool`] because the macro
 /// implements this, and the user implements the latter.
 pub trait ToolState {
     /// Associated parameter type.
@@ -245,7 +245,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for AgentRunning<'_
                 this.terminate();
 
                 // TODO: Utterly broken to use `poll()` here for this, but a proper method that
-                // taeks `&mut` is really hard to do with the `Pin` stuff
+                // takes `&mut` is really hard to do with the `Pin` stuff
                 let result = this.streaming.poll(ctx);
                 let Poll::Ready(Ok((message, token_usage))) = result else {
                     return Poll::Ready(Some(Err(anyhow!(

@@ -31,7 +31,7 @@ impl Client {
 
     /// Submit the given chat history, providing the given tools.
     ///
-    /// Note on the retun type: The `impl Stream` actually uses none of the lifetimes and types
+    /// Note on the return type: The `impl Stream` actually uses none of the lifetimes and types
     /// here, but Rust currently requires specifying all types in `use<>` anyway.
     pub async fn chat_stream<'tc, T: Into<ToolChoice<'tc>>>(
         &self,

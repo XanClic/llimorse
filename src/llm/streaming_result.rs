@@ -156,7 +156,7 @@ struct UsagePayload {
     completion_tokens: u32,
 }
 
-/// Streamed assistant messsage
+/// Streamed assistant message
 #[derive(Clone, Debug, Deserialize)]
 struct StreamChoice {
     /// Delta to apply to the assistant message
