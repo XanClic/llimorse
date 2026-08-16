@@ -3,13 +3,12 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-mod llm;
 mod tools;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use futures::StreamExt;
-use llm::StreamingChunk;
+use llimo::StreamingChunk;
 use std::io::{self, Write};
 
 /// Command-line arguments for WorkBuddy
@@ -76,8 +75,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let llm = llm::Client::new(&args.llama_url);
-    let mut agent = llm::Agent::new(llm);
+    let llm = llimo::Client::new(&args.llama_url);
+    let mut agent = llimo::Agent::new(llm);
 
     agent.add_tool(tools::HelloTool::default());
 

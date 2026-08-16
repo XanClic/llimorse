@@ -1,9 +1,9 @@
 //! Tools for agentic use.
 
-use crate::llm::{self, CallableTool};
 use anyhow::Result;
+use llimo::CallableTool;
 
-llm::tool! {
+llimo::tool! {
     'name: "hello";
 
     /// Make the initial greeting to the user extra special! Use this to be super friendly.

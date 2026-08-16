@@ -14,6 +14,7 @@ pub use streaming_result::StreamingChunk;
 /// Specifically, defines a tool with its parameters and a state object.  Users still need to
 /// implement the [`CallableTool`] trait.  To add the tool to an agent, call [`Agent::add_tool()`]
 /// with the `'state` type.
+#[macro_export]
 macro_rules! tool {
     (
         'name: $name:literal;
@@ -53,7 +54,7 @@ macro_rules! tool {
             )*
         }
 
-        impl $crate::llm::agent::Tool for $type_name {
+        impl $crate::agent::Tool for $type_name {
             fn name(&self) -> String {
                 $name.into()
             }
@@ -68,14 +69,12 @@ macro_rules! tool {
 
             fn execute_unparsed(&self, arguments: String) -> anyhow::Result<String> {
                 let params: $param_name = serde_json::from_str(&arguments)?;
-                <Self as $crate::llm::agent::CallableTool>::execute(self, params)
+                <Self as $crate::agent::CallableTool>::execute(self, params)
             }
         }
 
-        impl $crate::llm::agent::ToolState for $type_name {
+        impl $crate::agent::ToolState for $type_name {
             type ParamType = $param_name;
         }
     }
 }
-
-pub(crate) use tool;
