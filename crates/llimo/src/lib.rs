@@ -1,5 +1,8 @@
 //! Tools for interacting with a llama-server (llama.cpp).
 
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+
 pub mod agent;
 pub mod client;
 pub mod line_format;
