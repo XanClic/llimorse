@@ -85,6 +85,14 @@ pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     terminated: bool,
 }
 
+/// `Future` to await a full agent response without streaming
+#[pin_project]
+pub struct AgentResponse<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
+    /// Don’t tell anyone, but we actually do still stream, secretly.
+    #[pin]
+    stream: AgentRunning<'a, S>,
+}
+
 impl Agent {
     /// Create a new agent harness around the given [`Client`].
     pub fn new(client: Client) -> Self {
@@ -200,7 +208,7 @@ impl Agent {
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'_, S> {
+impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'a, S> {
     /// Same as [`Agent::execute_pending_calls()`].
     ///
     /// The problem is that [`AgentRunning`] retains a reference to [`Agent`] while it lives, so
@@ -215,6 +223,11 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'_, S> {
     pub async fn execute_pending_calls(self) -> bool {
         assert!(self.terminated);
         self.agent.execute_pending_calls().await
+    }
+
+    /// Await the full response instead of a stream of parts.
+    pub fn full_response(self) -> AgentResponse<'a, S> {
+        AgentResponse { stream: self }
     }
 }
 
@@ -280,18 +293,38 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedStream for AgentRunni
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Future for AgentRunning<'_, S> {
+impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentResponse<'a, S> {
+    /// Same as [`Agent::execute_pending_calls()`].
+    ///
+    /// The problem is that [`AgentResponse`] retains a reference to [`Agent`] while it lives, so
+    /// without dropping it, [`Agent::execute_pending_calls()`] cannot be run.  This function plugs
+    /// that gap, doing both (dropping and executing the calls).
+    ///
+    /// Must only be called after the request has run its course, with success.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` has not been awaited yet.
+    pub async fn execute_pending_calls(self) -> bool {
+        assert!(self.stream.is_terminated());
+        self.stream.agent.execute_pending_calls().await
+    }
+}
+
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Future for AgentResponse<'_, S> {
     type Output = Result<()>;
 
-    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Result<()>> {
-        if <Self as FusedStream>::is_terminated(&self) {
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Result<()>> {
+        let mut this = self.project();
+
+        if this.stream.is_terminated() {
             // Technically not true if terminated because of error, but that’s your fault for
             // using both `poll_next()` and `poll()` then
             return Poll::Ready(Ok(()));
         }
 
         loop {
-            match self.as_mut().poll_next(ctx) {
+            match this.stream.as_mut().poll_next(ctx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(err)),
                 Poll::Ready(Some(_)) => continue,
