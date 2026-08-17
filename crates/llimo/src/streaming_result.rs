@@ -11,7 +11,6 @@ use std::collections::VecDeque;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tracing::debug;
 
 /// Streamable result for a chat completion request
 #[pin_project(project = StreamingResultProjection)]
@@ -187,6 +186,67 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
 }
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<'_, S> {
+    /// Implementation for [`<StreamingResult as Stream>::poll_next()`].
+    ///
+    /// Implemented separately so the actual function can check for completion and call
+    /// [Self::terminate()`] when necessary.
+    fn do_poll_next(&mut self, ctx: &mut Context<'_>) -> Poll<Option<Result<StreamingChunk>>> {
+        if let Some(chunk) = self.chunks.pop_front() {
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+
+        if *self.done {
+            let result = match mem::take(self.constructing).finalize() {
+                Ok(message) => {
+                    *self.full_message = Some(message);
+                    None
+                }
+                Err(err) => Some(Err(err.context("constructing finalized message"))),
+            };
+
+            return Poll::Ready(result);
+        }
+
+        let Poll::Ready(line) = self.stream.as_mut().poll_next(ctx) else {
+            return Poll::Pending;
+        };
+
+        let line = match line {
+            Some(Ok(line)) => line,
+            Some(Err(err)) => {
+                return Poll::Ready(Some(Err(err.context("reading completion stream"))));
+            }
+            None => {
+                return Poll::Ready(Some(Err(anyhow!(
+                    "completion stream ended before being done"
+                ))));
+            }
+        };
+
+        let Some(data) = line.trim().strip_prefix("data: ") else {
+            return self.do_poll_next(ctx);
+        };
+
+        if data == "[DONE]" {
+            self.stream.as_mut().project().terminate();
+            *self.done = true;
+        } else {
+            let parsed = match serde_json::from_str::<StreamChunk>(data) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    let err: anyhow::Error = err.into();
+                    return Poll::Ready(Some(Err(err.context("completion stream invalid"))));
+                }
+            };
+
+            if let Err(err) = self.apply_chunk(parsed) {
+                return Poll::Ready(Some(Err(err)));
+            }
+        }
+
+        self.do_poll_next(ctx)
+    }
+
     /// Apply an incoming stream chunk.
     ///
     /// Populates all of:
@@ -250,72 +310,18 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for StreamingResult
         mut self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
     ) -> Poll<Option<Result<StreamingChunk>>> {
+        if <Self as FusedStream>::is_terminated(&self) {
+            return Poll::Ready(Some(Err(anyhow!("Stream is terminated"))));
+        }
+
         let mut this = self.as_mut().project();
+        let result = this.do_poll_next(ctx);
 
-        if let Some(chunk) = this.chunks.pop_front() {
-            debug!("Returning chunk: {chunk:?}");
-            return Poll::Ready(Some(Ok(chunk)));
+        if matches!(result, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
+            this.terminate();
         }
 
-        if *this.done {
-            let result = match mem::take(this.constructing).finalize() {
-                Ok(message) => {
-                    *this.full_message = Some(message);
-                    None
-                }
-                Err(err) => {
-                    this.terminate();
-                    Some(Err(err.context("constructing finalized message")))
-                }
-            };
-
-            return Poll::Ready(result);
-        }
-
-        let Poll::Ready(line) = this.stream.as_mut().poll_next(ctx) else {
-            return Poll::Pending;
-        };
-
-        let line = match line {
-            Some(Ok(line)) => line,
-            Some(Err(err)) => {
-                this.terminate();
-                return Poll::Ready(Some(Err(err.context("reading completion stream"))));
-            }
-            None => {
-                this.terminate();
-                return Poll::Ready(Some(Err(anyhow!(
-                    "completion stream ended before being done"
-                ))));
-            }
-        };
-
-        debug!("Input line: {line}");
-
-        let Some(data) = line.trim().strip_prefix("data: ") else {
-            return <Self as Stream>::poll_next(self, ctx);
-        };
-
-        if data == "[DONE]" {
-            this.stream.project().terminate();
-            *this.done = true;
-        } else {
-            let parsed = match serde_json::from_str::<StreamChunk>(data) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    this.terminate();
-                    let err: anyhow::Error = err.into();
-                    return Poll::Ready(Some(Err(err.context("completion stream invalid"))));
-                }
-            };
-
-            if let Err(err) = this.apply_chunk(parsed) {
-                this.terminate();
-                return Poll::Ready(Some(Err(err)));
-            }
-        }
-
-        <Self as Stream>::poll_next(self, ctx)
+        result
     }
 }
 
@@ -344,10 +350,13 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Future for StreamingResult
         }
 
         let this = self.project();
-        Poll::Ready(Ok((
-            this.full_message.take().unwrap(),
-            this.token_usage.take(),
-        )))
+        let Some(full_message) = this.full_message.take() else {
+            return Poll::Ready(Err(anyhow!(
+                "Full message already taken or error occurred during streaming"
+            )));
+        };
+
+        Poll::Ready(Ok((full_message, this.token_usage.take())))
     }
 }
 
