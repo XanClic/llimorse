@@ -164,6 +164,28 @@ struct StreamChoice {
     delta: StreamingAssistantMessage,
 }
 
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
+    /// Return the full message after streaming is done.
+    ///
+    /// Will only return `Some(_)` once streaming is done ([`<Self as
+    /// FusedStream>::is_terminated()`] returns true) and only if there was no error.
+    ///
+    /// `.take()`s the full message, so will return it only once.
+    pub(crate) fn full_message_pinned(self: Pin<&mut Self>) -> Option<AssistantMessage> {
+        self.project().full_message.take()
+    }
+
+    /// Return the token usage after streaming is done, if sent by the server.
+    ///
+    /// Will only return `Some(_)` once streaming is done ([`<Self as
+    /// FusedStream>::is_terminated()`] returns true) and only if there was no error.
+    ///
+    /// `.take()`s the token count, so will return it only once.
+    pub(crate) fn token_usage_pinned(self: Pin<&mut Self>) -> Option<TokenUsage> {
+        self.project().token_usage.take()
+    }
+}
+
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<'_, S> {
     /// Apply an incoming stream chunk.
     ///

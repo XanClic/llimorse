@@ -257,10 +257,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for AgentRunning<'_
             Poll::Ready(None) => {
                 this.terminate();
 
-                // TODO: Utterly broken to use `poll()` here for this, but a proper method that
-                // takes `&mut` is really hard to do with the `Pin` stuff
-                let result = this.streaming.poll(ctx);
-                let Poll::Ready(Ok((message, token_usage))) = result else {
+                let Some(message) = this.streaming.as_mut().full_message_pinned() else {
                     return Poll::Ready(Some(Err(anyhow!(
                         "Assistant did not generate a complete message"
                     ))));
@@ -277,7 +274,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for AgentRunning<'_
 
                 this.agent.push(message);
 
-                if let Some(token_usage) = token_usage {
+                if let Some(token_usage) = this.streaming.token_usage_pinned() {
                     this.agent.token_usage = token_usage;
                 }
 
