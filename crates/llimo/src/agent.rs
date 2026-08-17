@@ -71,7 +71,7 @@ pub trait CallableTool: ToolState {
     fn execute(&self, arguments: <Self as ToolState>::ParamType) -> Result<String>;
 }
 
-/// Requested currently being executed by the LLM.
+/// Request currently being executed by the LLM.
 #[pin_project(project = AgentRunningProjection)]
 pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     /// The results as it is begin generated
