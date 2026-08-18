@@ -9,7 +9,9 @@ use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use futures::StreamExt;
 use llimo::StreamingChunk;
+use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 /// Command-line arguments for WorkBuddy
 #[derive(Parser)]
@@ -21,6 +23,10 @@ struct Args {
     /// Base URL of a SearXNG instance for the web_search tool
     #[arg(long, default_value = "http://127.0.0.1:8888")]
     searxng_url: String,
+
+    /// Path to a file containing the system prompt
+    #[arg(long)]
+    system: Option<PathBuf>,
 
     /// Enable debug-level logging
     #[arg(long)]
@@ -75,12 +81,16 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let system_prompt = args.system.map(fs::read_to_string).transpose()?;
+
     let llm = llimo::Client::new(&args.llama_url);
     let mut agent = llimo::Agent::new(llm);
 
     agent.add_tool(tools::HelloTool::default());
 
-    agent.push_system("Who’s a friendly work buddy? You’re a friendly work buddy!");
+    if let Some(system_prompt) = system_prompt {
+        agent.push_system(system_prompt);
+    }
 
     agent.push_user("Hallo!");
     loop {
