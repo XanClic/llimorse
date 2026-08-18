@@ -3,8 +3,6 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-mod tools;
-
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use futures::StreamExt;
@@ -85,8 +83,6 @@ async fn main() -> Result<()> {
 
     let llm = llimo::Client::new(&args.llama_url);
     let mut agent = llimo::Agent::new(llm);
-
-    agent.add_tool(tools::HelloTool::default());
 
     if let Some(system_prompt) = system_prompt {
         agent.push_system(system_prompt);
