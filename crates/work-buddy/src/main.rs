@@ -84,6 +84,8 @@ async fn main() -> Result<()> {
     let llm = llimo::Client::new(&args.llama_url);
     let mut agent = llimo::Agent::new(llm);
 
+    agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
+
     if let Some(system_prompt) = system_prompt {
         agent.push_system(system_prompt);
     }
