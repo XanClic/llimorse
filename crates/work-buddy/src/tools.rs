@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use llimo::CallableTool;
+use serde_json::Value;
 
 llimo::tool! {
     'name: "hello";
@@ -19,7 +20,7 @@ llimo::tool! {
 }
 
 impl CallableTool for HelloTool {
-    fn execute(&self, arguments: HelloToolParams) -> Result<String> {
+    async fn execute(&self, arguments: HelloToolParams) -> Result<Value> {
         eprintln!(
             "\n\x1b[31;1mA super special hello from the LLM: {}\x1b[0m\n",
             arguments.tagline

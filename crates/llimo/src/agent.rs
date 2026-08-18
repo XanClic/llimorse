@@ -12,6 +12,7 @@ use futures::{Stream, StreamExt};
 use pin_project::pin_project;
 use schemars::{JsonSchema, Schema};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::mem;
 use std::pin::Pin;
@@ -52,7 +53,10 @@ pub trait Tool {
     fn schema(&self) -> Schema;
 
     /// Execute this tool, arguments given in JSON format (unparsed)
-    fn execute_unparsed(&self, arguments: String) -> Result<String>;
+    fn execute_unparsed(
+        &self,
+        arguments: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + '_>>;
 }
 
 /// Connects a tool to its parameter type.
@@ -66,9 +70,10 @@ pub trait ToolState {
 }
 
 /// User-defined trait for a tool.
+#[allow(async_fn_in_trait)]
 pub trait CallableTool: ToolState {
     /// Execute a tool call.
-    fn execute(&self, arguments: <Self as ToolState>::ParamType) -> Result<String>;
+    async fn execute(&self, arguments: <Self as ToolState>::ParamType) -> Result<Value>;
 }
 
 /// Request currently being executed by the LLM.
@@ -200,7 +205,7 @@ impl Agent {
                     .get(function.name.as_str())
                     .ok_or_else(|| anyhow!("No such function: {}", function.name))?;
 
-                state.execute_unparsed(function.arguments)
+                state.execute_unparsed(function.arguments).await
             }
 
             ToolCallParams::Custom { custom } => bail!("No such tool: {}", custom.name),

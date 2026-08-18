@@ -70,9 +70,15 @@ macro_rules! tool {
                 schemars::schema_for!($param_name)
             }
 
-            fn execute_unparsed(&self, arguments: String) -> anyhow::Result<String> {
-                let params: $param_name = serde_json::from_str(&arguments)?;
-                <Self as $crate::agent::CallableTool>::execute(self, params)
+            fn execute_unparsed(
+                &self,
+                arguments: String,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + '_>> {
+                Box::pin(async move {
+                    let params: $param_name = serde_json::from_str(&arguments)?;
+                    let result = <Self as $crate::agent::CallableTool>::execute(self, params).await?;
+                    Ok(result.to_string())
+                })
             }
         }
 
