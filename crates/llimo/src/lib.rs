@@ -7,6 +7,7 @@ pub mod agent;
 pub mod client;
 pub mod line_format;
 pub mod streaming_result;
+pub mod tools;
 
 pub use agent::{Agent, CallableTool};
 pub use client::Client;
