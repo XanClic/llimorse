@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
 
@@ -345,6 +345,14 @@ impl ToolResult {
         ToolResult {
             tool_call_id: Some(call_id),
             content,
+        }
+    }
+
+    /// Reject this tool call.
+    pub fn rejected(call_id: String, error: Error) -> Self {
+        ToolResult {
+            tool_call_id: Some(call_id),
+            content: format!("TOOL CALL REJECTED: {error}"),
         }
     }
 }

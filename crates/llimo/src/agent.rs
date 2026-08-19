@@ -11,12 +11,11 @@ use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
 use pin_project::pin_project;
 use schemars::{JsonSchema, Schema};
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::{fmt, mem};
 
 /// Agent harness around an LLM client.
 pub struct Agent {
@@ -53,27 +52,39 @@ pub trait Tool {
     fn schema(&self) -> Schema;
 
     /// Execute this tool, arguments given in JSON format (unparsed)
-    fn execute_unparsed(
-        &self,
-        arguments: String,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + '_>>;
+    fn execute_unparsed<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + 'a>>;
+
+    /// Format the tool call arguments for `Display`
+    fn fmt_call_display(&self, f: &mut fmt::Formatter<'_>, arguments: &str) -> fmt::Result;
+
+    /// Format the tool call result for `Display`
+    fn fmt_call_result_display(&self, f: &mut fmt::Formatter<'_>, result: &str) -> fmt::Result;
 }
 
-/// Connects a tool to its parameter type.
+/// Connects a tool to its parameter and result types.
 ///
-/// This exists so [`CallableTool`] is forced to use the correct type (when using the
+/// This exists so [`CallableTool`] is forced to use the correct types (when using the
 /// [`tool!`](super::tool) macro).  It is separate from [`CallableTool`] because the macro
 /// implements this, and the user implements the latter.
 pub trait ToolState {
     /// Associated parameter type.
-    type ParamType: for<'a> Deserialize<'a> + JsonSchema;
+    type ParamType: for<'a> Deserialize<'a> + fmt::Display + JsonSchema;
+
+    /// Associated return type.
+    type ResultType: for<'a> Deserialize<'a> + Serialize + fmt::Display;
 }
 
 /// User-defined trait for a tool.
 #[allow(async_fn_in_trait)]
 pub trait CallableTool: ToolState {
     /// Execute a tool call.
-    async fn execute(&self, arguments: <Self as ToolState>::ParamType) -> Result<Value>;
+    async fn execute(
+        &self,
+        arguments: <Self as ToolState>::ParamType,
+    ) -> Result<<Self as ToolState>::ResultType>;
 }
 
 /// Request currently being executed by the LLM.
@@ -165,39 +176,47 @@ impl Agent {
     ///
     /// Return whether any have been executed, in which case the results will need to be submitted
     /// to the LLM.
-    pub async fn execute_pending_calls(&mut self) -> bool {
-        let results = {
-            let mut futs = FuturesUnordered::new();
-            for tool_call in mem::take(&mut self.pending_calls) {
-                futs.push(self.execute_call(tool_call));
+    pub async fn execute_pending_calls<
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
+    >(
+        &mut self,
+        mut tool_guard: F1,
+        mut tool_result_guard: F2,
+    ) -> &[ChatMessage] {
+        let mut results = Vec::<ChatMessage>::with_capacity(self.pending_calls.len());
+        let mut futs = FuturesUnordered::new();
+        for call in mem::take(&mut self.pending_calls) {
+            if let Err(err) = tool_guard(self, &call) {
+                results.push(ToolResult::rejected(call.id, err).into());
+            } else {
+                futs.push(async { (self.execute_call(&call.call).await, call) })
             }
+        }
 
-            let mut results = Vec::with_capacity(futs.len());
-            while let Some(result) = futs.next().await {
-                results.push(result.into());
+        while let Some((result, call)) = futs.next().await {
+            if let Err(err) = tool_result_guard(self, &call, &result) {
+                results.push(ToolResult::rejected(call.id, err).into());
+            } else {
+                results.push(ToolResult::new(call.id, result).into());
             }
-            results
-        };
+        }
+        drop(futs);
 
         if results.is_empty() {
-            false
+            &[]
         } else {
+            let base_i = self.history.len();
             self.history.extend(results);
-            true
+            &self.history[base_i..]
         }
-    }
-
-    /// Executes the given tool call, creating a corresponding [`ToolResult`].
-    async fn execute_call(&self, tool_call: ToolCall) -> ToolResult {
-        let result = self.do_execute_call(tool_call.call).await;
-        ToolResult::new(tool_call.id, result)
     }
 
     /// Performs the actual tool call, returning a `Result<_>`.
     ///
     /// To be usable by the LLM, this needs to be called by something that catches the errors and
     /// properly formats them for the LLM.
-    async fn do_execute_call(&self, tool_call: ToolCallParams) -> Result<String> {
+    async fn execute_call(&self, tool_call: &ToolCallParams) -> Result<String> {
         match tool_call {
             ToolCallParams::Function { function } => {
                 let state = self
@@ -205,11 +224,40 @@ impl Agent {
                     .get(function.name.as_str())
                     .ok_or_else(|| anyhow!("No such function: {}", function.name))?;
 
-                state.execute_unparsed(function.arguments).await
+                state.execute_unparsed(&function.arguments).await
             }
 
             ToolCallParams::Custom { custom } => bail!("No such tool: {}", custom.name),
         }
+    }
+
+    /// Returns an object that implements [`fmt::Display`] to properly format the call.
+    pub fn display_call<'a>(&'a self, tool_call: &'a ToolCallParams) -> impl fmt::Display + 'a {
+        DisplayCall {
+            agent: self,
+            call: tool_call,
+        }
+    }
+
+    /// Returns an object that implements [`fmt::Display`] to properly format the result.
+    pub fn display_call_result<'a>(
+        &'a self,
+        tool_call: &'a ToolCallParams,
+        result: &'a String,
+    ) -> impl fmt::Display + 'a {
+        DisplayCallResult {
+            agent: self,
+            call: tool_call,
+            result,
+        }
+    }
+
+    /// Return the token usage from the last request: Prompt tokens, and completion tokens.
+    pub fn token_usage(&self) -> (usize, usize) {
+        (
+            self.token_usage.prompt_tokens as usize,
+            self.token_usage.completion_tokens as usize,
+        )
     }
 }
 
@@ -225,9 +273,18 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'a, S> {
     /// # Panics
     ///
     /// Panics if [`AgentRunning::terminated`] is false.
-    pub async fn execute_pending_calls(self) -> bool {
+    pub async fn execute_pending_calls<
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
+    >(
+        self,
+        tool_guard: F1,
+        tool_result_guard: F2,
+    ) -> &'a [ChatMessage] {
         assert!(self.terminated);
-        self.agent.execute_pending_calls().await
+        self.agent
+            .execute_pending_calls(tool_guard, tool_result_guard)
+            .await
     }
 
     /// Await the full response instead of a stream of parts.
@@ -307,9 +364,19 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentResponse<'a, S> {
     /// # Panics
     ///
     /// Panics if `self` has not been awaited yet.
-    pub async fn execute_pending_calls(self) -> bool {
+    pub async fn execute_pending_calls<
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
+    >(
+        self,
+        tool_guard: F1,
+        tool_result_guard: F2,
+    ) -> &'a [ChatMessage] {
         assert!(self.stream.is_terminated());
-        self.stream.agent.execute_pending_calls().await
+        self.stream
+            .agent
+            .execute_pending_calls(tool_guard, tool_result_guard)
+            .await
     }
 }
 
@@ -334,6 +401,61 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Future for AgentResponse<'
                     return Poll::Ready(Ok(()));
                 }
             }
+        }
+    }
+}
+
+/// Helper struct for properly formatting call parameters for display.
+pub struct DisplayCall<'a> {
+    /// Agent; required to parse the call parameters
+    agent: &'a Agent,
+
+    /// Raw call parameters
+    call: &'a ToolCallParams,
+}
+
+impl fmt::Display for DisplayCall<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.call {
+            ToolCallParams::Function { function } => {
+                let Some(state) = self.agent.tools.get(function.name.as_str()) else {
+                    return write!(f, "[unknown function {}]", function.name);
+                };
+
+                write!(f, "[function call] {}(", function.name)?;
+                state.fmt_call_display(f, &function.arguments)?;
+                write!(f, ")")
+            }
+
+            ToolCallParams::Custom { custom } => write!(f, "[unknown tool {}]", custom.name),
+        }
+    }
+}
+
+/// Helper struct for properly formatting a call result for display.
+pub struct DisplayCallResult<'a> {
+    /// Agent; required to parse the call result
+    agent: &'a Agent,
+
+    /// Raw call parameters
+    call: &'a ToolCallParams,
+
+    /// Raw tool result
+    result: &'a String,
+}
+
+impl fmt::Display for DisplayCallResult<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.call {
+            ToolCallParams::Function { function } => {
+                let Some(state) = self.agent.tools.get(function.name.as_str()) else {
+                    return write!(f, "[unknown function {}]", function.name);
+                };
+
+                state.fmt_call_result_display(f, self.result)
+            }
+
+            ToolCallParams::Custom { custom } => write!(f, "[unknown tool {}]", custom.name),
         }
     }
 }

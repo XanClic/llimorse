@@ -32,6 +32,14 @@ macro_rules! tool {
             )*
         }
 
+        $(#[$result_attr:meta])*
+        'result: $result_vis:vis struct $result_name:ident {
+            $(
+                $(#[$result_id_attr:meta])*
+                $result_identifier:ident: $result_type:ty,
+            )*
+        }
+
         $(#[$state_attr:meta])*
         'state: $state_vis:vis struct $type_name:ident {
             $(
@@ -47,6 +55,15 @@ macro_rules! tool {
             $(
                 $(#[$id_attr])*
                 $identifier: $type,
+            )*
+        }
+
+        $(#[$result_attr])*
+        #[derive(serde::Deserialize, serde::Serialize)]
+        $result_vis struct $result_name {
+            $(
+                $(#[$result_id_attr])*
+                $result_identifier: $result_type,
             )*
         }
 
@@ -71,20 +88,47 @@ macro_rules! tool {
                 schemars::schema_for!($param_name)
             }
 
-            fn execute_unparsed(
-                &self,
-                arguments: String,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + '_>> {
+            fn execute_unparsed<'a>(
+                &'a self,
+                arguments: &'a str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + 'a>> {
                 Box::pin(async move {
-                    let params: $param_name = serde_json::from_str(&arguments)?;
-                    let result = <Self as $crate::agent::CallableTool>::execute(self, params).await?;
-                    Ok(result.to_string())
+                    let params: $param_name = serde_json::from_str(arguments)?;
+                    let result: $result_name = <Self as $crate::agent::CallableTool>::execute(self, params).await?;
+                    Ok(serde_json::to_string(&result)?.to_string())
                 })
+            }
+
+            fn fmt_call_display(
+                &self,
+                f: &mut std::fmt::Formatter<'_>,
+                arguments: &str,
+            ) -> std::fmt::Result {
+                let params: $param_name = match serde_json::from_str(arguments) {
+                    Ok(parsed) => parsed,
+                    Err(err) => return write!(f, "[failed to parse: {err}]"),
+                };
+
+                write!(f, "{params}")
+            }
+
+            fn fmt_call_result_display(
+                &self,
+                f: &mut std::fmt::Formatter<'_>,
+                result: &str,
+            ) -> std::fmt::Result {
+                let result: $result_name = match serde_json::from_str(result) {
+                    Ok(parsed) => parsed,
+                    Err(err) => return write!(f, "[failed to parse: {err}]"),
+                };
+
+                write!(f, "{result}")
             }
         }
 
         impl $crate::agent::ToolState for $type_name {
             type ParamType = $param_name;
+            type ResultType = $result_name;
         }
     }
 }

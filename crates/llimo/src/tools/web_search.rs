@@ -2,7 +2,9 @@
 
 use crate::CallableTool;
 use anyhow::{Context, Result, anyhow};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fmt;
 
 crate::tool! {
     'name: "web_search";
@@ -17,12 +19,35 @@ crate::tool! {
         max_results: Option<usize>,
     }
 
+    /// Return web search results.
+    #[derive(Debug)]
+    'result: pub struct WebSearchResults {
+        /// Original query
+        query: String,
+
+        /// Search results
+        results: Vec<WebSearchResult>,
+    }
+
     /// Execute a web search via SearXNG.
     #[derive(Clone, Debug)]
     'state: pub struct WebSearch {
         /// URL base to query the SearXNG instance
         searxng_url_base: String,
     }
+}
+
+/// A single web search result
+#[derive(Debug, Deserialize, Serialize)]
+struct WebSearchResult {
+    /// The page title
+    title: String,
+
+    /// The source URL
+    url: String,
+
+    /// A snippet summarizing the content
+    snippet: String,
 }
 
 impl WebSearch {
@@ -35,7 +60,7 @@ impl WebSearch {
 }
 
 impl CallableTool for WebSearch {
-    async fn execute(&self, arguments: WebSearchParams) -> Result<Value> {
+    async fn execute(&self, arguments: WebSearchParams) -> Result<WebSearchResults> {
         let searxng_url = format!(
             "{}/search?q={}&format=json&categories=general",
             self.searxng_url_base,
@@ -65,15 +90,47 @@ impl CallableTool for WebSearch {
 
         let results = results
             .iter()
-            .map(|r| {
-                json!({
-                    "title": r["title"].as_str().unwrap_or(""),
-                    "url": r["url"].as_str().unwrap_or(""),
-                    "snippet": r["content"].as_str().unwrap_or(""),
-                })
+            .map(|r| WebSearchResult {
+                title: r["title"].as_str().unwrap_or("").to_string(),
+                url: r["url"].as_str().unwrap_or("").to_string(),
+                snippet: r["content"].as_str().unwrap_or("").to_string(),
             })
             .collect::<Vec<_>>();
 
-        Ok(json!({ "query": arguments.query, "results": results }))
+        Ok(WebSearchResults {
+            query: arguments.query,
+            results,
+        })
+    }
+}
+
+impl fmt::Display for WebSearchParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "query={:?}", self.query)?;
+        if let Some(max_results) = self.max_results {
+            write!(f, " max_results={max_results}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for WebSearchResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+        let result_count = self.results.len();
+        for (i, result) in self.results.iter().enumerate() {
+            if i == result_count - 1 {
+                write!(f, "{result}")?;
+            } else {
+                write!(f, "{result}, ")?;
+            }
+        }
+        write!(f, "]")
+    }
+}
+
+impl fmt::Display for WebSearchResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.title, self.url)
     }
 }

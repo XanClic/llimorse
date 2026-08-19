@@ -5,12 +5,19 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 clap.workspace = true
+color-eyre = "0.6"
+crossterm = "0.29"
 fastrand = "2"
 futures.workspace = true
 llimo.workspace = true
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+ratatui-textarea = "0.9"
+reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+textwrap = "0.16"
 tokio.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
