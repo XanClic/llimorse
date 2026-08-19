@@ -18,6 +18,7 @@ use std::task::{Context, Poll};
 use std::{fmt, mem};
 
 /// Agent harness around an LLM client.
+#[derive(Debug)]
 pub struct Agent {
     /// LLM client
     client: Client,
@@ -41,7 +42,7 @@ pub struct Agent {
 /// Tool available to an agent.
 ///
 /// This trait is what is needed by [`Agent`] to use a tool.
-pub trait Tool {
+pub trait Tool: fmt::Debug + Send {
     /// Tool name
     fn name(&self) -> String;
 

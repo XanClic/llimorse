@@ -9,6 +9,7 @@ use std::time;
 use tracing::{debug, warn};
 
 /// Connection to llama-server
+#[derive(Debug)]
 pub struct Client {
     /// HTTP client, handling the actual network connection
     http: reqwest::Client,

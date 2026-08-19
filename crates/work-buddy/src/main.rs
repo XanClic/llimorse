@@ -5,14 +5,17 @@
 
 use anyhow::{Result, anyhow};
 use clap::{CommandFactory, FromArgMatches, Parser};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use llimo::StreamingChunk;
 use std::borrow::Cow;
 use std::num::Saturating;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{fs, io};
+use tokio::sync::{Mutex as TokioMutex, Notify, mpsc};
 
 /// Command-line arguments for WorkBuddy
 #[derive(Parser)]
@@ -143,33 +146,62 @@ impl From<HistoryEntryType> for ratatui::layout::Alignment {
 
 /// The application state
 struct WorkBuddy {
-    /// The agent (connection to the LLM plus tools)
-    ///
-    /// Is `None` if currently processing a request.
-    agent: Option<llimo::Agent>,
+    /// Agent thread running concurrently
+    agent_thread: Option<JoinHandle<()>>,
 
+    /// Produces terminal events, asynchronously
+    events: TokioMutex<crossterm::event::EventStream>,
+
+    /// The chat history as shared with the agent
+    chat_history: Arc<Mutex<ChatHistory>>,
+
+    /// UI state
+    ui: Mutex<TermState>,
+
+    /// Submit user messages to the LLM
+    user_message_submit: mpsc::UnboundedSender<String>,
+
+    /// Notification from the agent to redraw the UI
+    agent_update: Arc<Notify>,
+
+    /// Set once we are supposed to exit
+    exit: Arc<AtomicBool>,
+}
+
+/// State of the agent-running part of WorkBuddy
+struct WorkBuddyAgent {
+    /// The chat history as shared with the agent
+    chat_history: Arc<Mutex<ChatHistory>>,
+
+    /// User messages to be submitted to the LLM
+    user_message_submit: mpsc::UnboundedReceiver<String>,
+
+    /// Notify the UI to redraw
+    update_ui: Arc<Notify>,
+
+    /// Set once we are supposed to exit
+    exit: Arc<AtomicBool>,
+}
+
+/// Chat history data
+struct ChatHistory {
     /// Full chat history (split into lines, but not broken by terminal width)
-    chat_history: Mutex<Vec<(String, HistoryEntryType)>>,
+    lines: Vec<(String, HistoryEntryType)>,
 
+    /// Token usage as last reported by the LLM
+    token_usage: (usize, usize),
+}
+
+/// UI state for WorkBuddy
+struct TermState {
     /// First line of the chat history to show (`usize::MAX` to follow the tail)
     history_scroll: Saturating<usize>,
 
     /// How many lines (elements of `chat_history`) are visible on screen right now
-    history_lines_on_screen: Mutex<usize>,
+    history_lines_on_screen: usize,
 
     /// User message input widget
     input_area: ratatui_textarea::TextArea<'static>,
-
-    /// User message to send as a request to the LLM
-    ///
-    /// Filled once `input_area` is submitted via the Enter key.
-    input: Option<String>,
-
-    /// Token usage as last reported by the LLM
-    token_usage: (usize, usize),
-
-    /// Set once we are supposed to exit
-    exit: bool,
 }
 
 impl WorkBuddy {
@@ -180,211 +212,151 @@ impl WorkBuddy {
         input_area.set_block(ratatui::widgets::Block::bordered().title("Input"));
         input_area.set_wrap_mode(ratatui_textarea::WrapMode::Word);
 
-        WorkBuddy {
-            agent: Some(agent),
-            chat_history: Mutex::new(Vec::new()),
-            history_scroll: Saturating(0),
-            history_lines_on_screen: Mutex::new(0),
-            input_area,
-            input: None,
+        let chat_history = Arc::new(Mutex::new(ChatHistory {
+            lines: Vec::new(),
             token_usage: (0, 0),
-            exit: false,
+        }));
+        let exit = Arc::new(AtomicBool::new(false));
+
+        let (user_message_send, user_message_recv) = mpsc::unbounded_channel();
+        let agent_update = Arc::new(Notify::new());
+
+        let agent_thread = thread::spawn({
+            let chat_history = Arc::clone(&chat_history);
+            let update_ui = Arc::clone(&agent_update);
+            let exit = Arc::clone(&exit);
+            move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        let mut wba = WorkBuddyAgent {
+                            chat_history,
+                            user_message_submit: user_message_recv,
+                            update_ui,
+                            exit,
+                        };
+                        if let Err(err) = wba.run(agent).await {
+                            panic!("Agent error: {err}");
+                        }
+                        wba.exit.store(true, Ordering::Relaxed);
+                    })
+            }
+        });
+
+        WorkBuddy {
+            agent_thread: Some(agent_thread),
+            events: TokioMutex::new(crossterm::event::EventStream::new()),
+
+            chat_history,
+
+            ui: Mutex::new(TermState {
+                history_scroll: Saturating(usize::MAX),
+                history_lines_on_screen: 0,
+                input_area,
+            }),
+
+            user_message_submit: user_message_send,
+            agent_update,
+
+            exit,
         }
     }
 
     /// Run the application until it finds it should exit.
-    async fn run(mut self, mut terminal: ratatui::DefaultTerminal) -> Result<()> {
+    async fn run(&mut self, mut terminal: ratatui::DefaultTerminal) -> Result<()> {
         let tick_rate = Duration::from_secs_f32(0.25);
         let mut last_refresh = Instant::now();
 
         loop {
-            let user_message = loop {
-                terminal.draw(|frame| self.render(frame))?;
+            terminal.draw(|frame| self.render(frame))?;
 
-                if self.exit {
-                    return Ok(());
-                }
+            if self.exit.load(Ordering::Relaxed) {
+                return Ok(());
+            }
 
-                if let Some(input) = self.input.take() {
-                    break input;
-                }
+            let timeout = tick_rate.saturating_sub(last_refresh.elapsed());
+            last_refresh = Instant::now();
 
-                let timeout = tick_rate.saturating_sub(last_refresh.elapsed());
-                last_refresh = Instant::now();
-
-                self.handle_term_input(timeout)?;
+            let result = futures::select! {
+                result = self.handle_term_input(timeout).fuse() => result,
+                _ = self.agent_update.notified().fuse() => Ok(()),
             };
-
-            self.agent.as_mut().unwrap().push_user(user_message);
-            self.agent_loop(&mut terminal).await?;
+            result?;
         }
     }
 
     /// Handle input on the terminal, with the given `poll_timeout`.
-    fn handle_term_input(&mut self, poll_timeout: Duration) -> Result<()> {
-        if crossterm::event::poll(poll_timeout)? {
-            use crossterm::event::Event;
+    async fn handle_term_input(&self, poll_timeout: Duration) -> Result<()> {
+        use crossterm::event::Event;
 
-            match crossterm::event::read()? {
-                Event::Key(key) => self.handle_key_event(key)?,
-                Event::Mouse(mouse) => self.handle_mouse_event(mouse)?,
-                _ => (),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Run a request on the agent to completion.
-    async fn agent_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-        let mut agent = self.agent.take().unwrap();
-
-        self.history_scroll.0 = usize::MAX;
-
-        loop {
-            {
-                let mut result = agent.submit().await?;
-
-                while let Some(chunk) = result.next().await {
-                    self.process_chunk(chunk?).await?;
-                    self.handle_term_input(Duration::from_secs(0))?;
-                    if self.exit {
-                        return Ok(());
-                    }
-                    terminal.draw(|frame| self.render(frame))?;
-                }
-            }
-
-            self.token_usage = agent.token_usage();
-            terminal.draw(|frame| self.render(frame))?;
-
-            let tool_results = agent
-                .execute_pending_calls(
-                    |agent, call| {
-                        self.append_to_history(
-                            &format!("[{}] {}", call.id, agent.display_call(&call.call)),
-                            HistoryEntryType::ToolCall,
-                            true,
-                        );
-                        terminal.draw(|frame| self.render(frame))?;
-                        Ok(())
-                    },
-                    |agent, call, result| {
-                        let name = match &call.call {
-                            llimo::line_format::ToolCallParams::Function { function } => {
-                                &function.name
-                            }
-                            llimo::line_format::ToolCallParams::Custom { custom } => &custom.name,
-                        };
-                        match result {
-                            Ok(result) => self.append_to_history(
-                                &format!(
-                                    "=[{name}/{}]=> {}",
-                                    call.id,
-                                    agent.display_call_result(&call.call, result)
-                                ),
-                                HistoryEntryType::ToolResultOk,
-                                true,
-                            ),
-                            Err(err) => self.append_to_history(
-                                &format!("=[{name}/{}]=> {err}", call.id),
-                                HistoryEntryType::ToolResultErr,
-                                true,
-                            ),
-                        }
-                        Ok(())
-                    },
-                )
-                .await;
-
-            if tool_results.is_empty() {
-                break;
-            }
-        }
-
-        self.agent = Some(agent);
-        Ok(())
-    }
-
-    /// Append the given string of type `ct` to the history.
-    ///
-    /// If `force_new_line` is true, append it to the prior line if the type matches; if it is
-    /// false, always create a new line.
-    fn append_to_history(&self, string: &str, ct: HistoryEntryType, force_new_line: bool) {
-        let mut chat_history = self.chat_history.lock().unwrap();
-
-        if let Some(last) = chat_history.last_mut() {
-            if last.1 == ct && !force_new_line {
-                last.0.push_str(string);
-                return;
-            } else if last.1 != ct {
-                chat_history.push((String::new(), HistoryEntryType::Empty));
-            }
-        }
-        chat_history.push((string.to_string(), ct));
-    }
-
-    /// Process the incoming `chunk` from the LLM (i.e. append it to the history).
-    async fn process_chunk(&mut self, chunk: StreamingChunk) -> Result<()> {
-        let (string, kind) = match chunk {
-            StreamingChunk::Content(content) => (content, HistoryEntryType::Content),
-            StreamingChunk::Reasoning(content) => (content, HistoryEntryType::Reasoning),
+        let result = {
+            let mut events = self.events.lock().await;
+            tokio::time::timeout(poll_timeout, events.next()).await
+        };
+        let Ok(result) = result else {
+            // Timeout means no event available, which is fine
+            return Ok(());
         };
 
-        let mut force_new_line = false;
-        for line in string.split('\n') {
-            self.append_to_history(line, kind, force_new_line);
-            force_new_line = true;
+        let Some(result) = result else {
+            // Stream ended
+            self.exit.store(true, Ordering::Relaxed);
+            return Ok(());
+        };
+
+        match result? {
+            Event::Key(key) => self.handle_key_event(key)?,
+            Event::Mouse(mouse) => self.handle_mouse_event(mouse)?,
+            _ => (),
         }
 
         Ok(())
     }
 
     /// Handle the given keyboard event.
-    fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> Result<()> {
+    fn handle_key_event(&self, event: crossterm::event::KeyEvent) -> Result<()> {
+        let mut ui = self.ui.lock().unwrap();
+
         if event.kind == crossterm::event::KeyEventKind::Press {
             if event.code == crossterm::event::KeyCode::Enter && event.modifiers.is_empty() {
-                if !self.input_area.is_empty() {
-                    let input = self.input_area.lines().join("\n");
-                    // Join plus split because otherwise the borrow checker is mad about `self` use
-                    for line in input.split("\n") {
-                        self.append_to_history(line, HistoryEntryType::User, true);
-                    }
-                    self.input = Some(input);
-                    self.input_area.clear();
+                if !ui.input_area.is_empty() {
+                    let _ = self
+                        .user_message_submit
+                        .send(ui.input_area.lines().join("\n"));
+                    ui.input_area.clear();
                     return Ok(());
                 }
             } else if event.code == crossterm::event::KeyCode::Esc {
-                self.exit = true;
+                self.exit.store(true, Ordering::Relaxed);
                 return Ok(());
             }
         }
 
-        self.input_area.input(event);
+        ui.input_area.input(event);
         Ok(())
     }
 
     /// Handle the given mouse event.
-    fn handle_mouse_event(&mut self, event: crossterm::event::MouseEvent) -> Result<()> {
+    fn handle_mouse_event(&self, event: crossterm::event::MouseEvent) -> Result<()> {
+        let history_len = self.chat_history.lock().unwrap().lines.len();
+        let mut ui = self.ui.lock().unwrap();
+
         match event.kind {
             crossterm::event::MouseEventKind::ScrollDown => {
-                let history_len = self.chat_history.lock().unwrap().len();
-                let lines_on_screen = *self.history_lines_on_screen.lock().unwrap();
-
-                self.history_scroll += 1;
-                if self.history_scroll.0 >= history_len.saturating_sub(lines_on_screen) {
-                    self.history_scroll.0 = usize::MAX;
+                ui.history_scroll += 1;
+                if ui.history_scroll.0 >= history_len.saturating_sub(ui.history_lines_on_screen) {
+                    ui.history_scroll.0 = usize::MAX;
                 }
             }
 
             crossterm::event::MouseEventKind::ScrollUp => {
-                let history_len = self.chat_history.lock().unwrap().len();
-                let lines_on_screen = *self.history_lines_on_screen.lock().unwrap();
-
-                if self.history_scroll.0 == usize::MAX {
-                    self.history_scroll.0 = history_len.saturating_sub(lines_on_screen + 1);
+                if ui.history_scroll.0 == usize::MAX {
+                    ui.history_scroll.0 =
+                        history_len.saturating_sub(ui.history_lines_on_screen + 1);
                 } else {
-                    self.history_scroll -= 1;
+                    ui.history_scroll -= 1;
                 }
             }
 
@@ -426,16 +398,17 @@ impl WorkBuddy {
         let history_line_count = history_cell.height.saturating_sub(2) as usize;
         let history_width = history_cell.width.saturating_sub(2) as usize;
 
-        let mut history_lines_on_screen = self.history_lines_on_screen.lock().unwrap();
-        *history_lines_on_screen = 0;
+        let mut history_lines_on_screen = 0;
+        let scroll = self.ui.lock().unwrap().history_scroll.0;
 
-        let history_lines = if self.history_scroll.0 == usize::MAX {
+        let history_lines = if scroll == usize::MAX {
             let mut history_lines = Self::into_ratatui_lines(
                 chat_history
+                    .lines
                     .iter()
                     .rev()
                     .flat_map(|line| {
-                        *history_lines_on_screen += 1; // diabolical
+                        history_lines_on_screen += 1; // diabolical
                         textwrap::wrap(&line.0, history_width)
                             .into_iter()
                             .rev()
@@ -448,10 +421,11 @@ impl WorkBuddy {
         } else {
             Self::into_ratatui_lines(
                 chat_history
+                    .lines
                     .iter()
-                    .skip(self.history_scroll.0)
+                    .skip(scroll)
                     .flat_map(|line| {
-                        *history_lines_on_screen += 1; // diabolical
+                        history_lines_on_screen += 1; // diabolical
                         textwrap::wrap(&line.0, history_width)
                             .into_iter()
                             .map(|l| (l, line.1))
@@ -460,21 +434,161 @@ impl WorkBuddy {
             )
         };
 
-        let chat_history = ratatui::text::Text {
+        self.ui.lock().unwrap().history_lines_on_screen = history_lines_on_screen;
+
+        let paragraph_content = ratatui::text::Text {
             alignment: None,
             style: Default::default(),
             lines: history_lines,
         };
 
-        let paragraph = ratatui::widgets::Paragraph::new(chat_history).block(
+        let paragraph = ratatui::widgets::Paragraph::new(paragraph_content).block(
             ratatui::widgets::Block::bordered().title(format!(
                 "Chat: {:.1}k+{:.1}k",
-                self.token_usage.0 as f32 * 1.0e-3,
-                self.token_usage.1 as f32 * 1.0e-3
+                chat_history.token_usage.0 as f32 * 1.0e-3,
+                chat_history.token_usage.1 as f32 * 1.0e-3
             )),
         );
 
+        let ui = self.ui.lock().unwrap();
+
         frame.render_widget(paragraph, history_cell);
-        frame.render_widget(&self.input_area, input_cell);
+        frame.render_widget(&ui.input_area, input_cell);
+    }
+}
+
+impl Drop for WorkBuddy {
+    fn drop(&mut self) {
+        if let Some(agent_thread) = self.agent_thread.take() {
+            self.exit.store(true, Ordering::Relaxed);
+            let _ = self.user_message_submit.send(String::new());
+            let _ = agent_thread.join();
+        }
+    }
+}
+
+impl WorkBuddyAgent {
+    /// Run agent requests in a loop until the exit flag is set (or an error occurs).
+    async fn run(&mut self, mut agent: llimo::Agent) -> Result<()> {
+        while let Some(message) = self.user_message_submit.recv().await {
+            self.push_history(&message, HistoryEntryType::User);
+            agent.push_user(message);
+            while let Ok(message) = self.user_message_submit.try_recv() {
+                self.push_history(&message, HistoryEntryType::User);
+                agent.push_user(message);
+            }
+
+            loop {
+                let mut result = agent.submit().await?;
+
+                while let Some(chunk) = result.next().await {
+                    self.process_chunk(chunk?);
+                    if self.exit.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                }
+
+                drop(result);
+
+                self.chat_history.lock().unwrap().token_usage = agent.token_usage();
+
+                let tool_results = agent
+                    .execute_pending_calls(
+                        |agent, call| {
+                            self.push_history(
+                                &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
+                                HistoryEntryType::ToolCall,
+                            );
+                            Ok(())
+                        },
+                        |agent, call, result| {
+                            let name = match &call.call {
+                                llimo::line_format::ToolCallParams::Function { function } => {
+                                    &function.name
+                                }
+                                llimo::line_format::ToolCallParams::Custom { custom } => {
+                                    &custom.name
+                                }
+                            };
+                            match result {
+                                Ok(result) => self.push_history(
+                                    &format!(
+                                        "=[{name}/{}]=> {}\n",
+                                        call.id,
+                                        agent.display_call_result(&call.call, result)
+                                    ),
+                                    HistoryEntryType::ToolResultOk,
+                                ),
+                                Err(err) => self.push_history(
+                                    &format!("=[{name}/{}]=> {err}\n", call.id),
+                                    HistoryEntryType::ToolResultErr,
+                                ),
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await;
+
+                let mut pending = !tool_results.is_empty();
+                while let Ok(message) = self.user_message_submit.try_recv() {
+                    self.push_history(&message, HistoryEntryType::User);
+                    agent.push_user(message);
+                    pending = true;
+                }
+
+                if !pending {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process the incoming `chunk` from the LLM (i.e. append it to the history).
+    fn process_chunk(&self, chunk: StreamingChunk) {
+        let (string, kind) = match chunk {
+            StreamingChunk::Content(content) => (content, HistoryEntryType::Content),
+            StreamingChunk::Reasoning(content) => (content, HistoryEntryType::Reasoning),
+        };
+
+        self.push_history(&string, kind);
+    }
+
+    /// Push the given string into the chat history, processing newlines
+    fn push_history(&self, string: &str, kind: HistoryEntryType) {
+        let mut history = self.chat_history.lock().unwrap();
+        let mut force_new_line = false;
+        for line in string.split('\n') {
+            history.push(line, kind, force_new_line);
+            force_new_line = true;
+        }
+        drop(history);
+
+        self.update_ui.notify_one();
+    }
+}
+
+impl ChatHistory {
+    /// Append the given string of type `ct` to the history.
+    ///
+    /// If `force_new_line` is true, append it to the prior line if the type matches; if it is
+    /// false, always create a new line.
+    fn push(&mut self, string: &str, kind: HistoryEntryType, force_new_line: bool) {
+        if let Some(last) = self.lines.last_mut() {
+            if last.1 == kind && !force_new_line {
+                last.0.push_str(string);
+                return;
+            } else if last.1 != kind {
+                // Convert empty lines of different type to type `Empty`, otherwise append `Empty`
+                if last.0.is_empty() {
+                    last.1 = HistoryEntryType::Empty;
+                } else {
+                    self.lines.push((String::new(), HistoryEntryType::Empty));
+                }
+            }
+        }
+
+        self.lines.push((string.to_string(), kind));
     }
 }
