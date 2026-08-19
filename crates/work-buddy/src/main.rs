@@ -4,12 +4,14 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 mod app;
+mod tools;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use app::WorkBuddy;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::fs;
 use std::path::PathBuf;
+use tools::TodoFile;
 
 /// Command-line arguments for WorkBuddy
 #[derive(Parser)]
@@ -29,6 +31,10 @@ struct Args {
     /// Enable debug-level logging
     #[arg(long)]
     debug: bool,
+
+    /// To-do file path
+    #[arg(long)]
+    todo: Option<PathBuf>,
 }
 
 /// Return a random “witty” tag line for --help
@@ -71,6 +77,11 @@ async fn main() -> Result<()> {
     let mut agent = llimo::Agent::new(llm);
 
     agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
+    if let Some(todo_file) = args.todo {
+        let todo_file = TodoFile::open(todo_file.clone())
+            .with_context(|| format!("{}", todo_file.display()))?;
+        todo_file.add_tools(&mut agent);
+    }
 
     if let Some(system_prompt) = system_prompt {
         agent.push_system(system_prompt);
