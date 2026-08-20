@@ -36,6 +36,10 @@ struct Args {
     /// Task file path
     #[arg(long)]
     tasks: Option<PathBuf>,
+
+    /// Directory to store work logs in
+    #[arg(long)]
+    worklogs: Option<PathBuf>,
 }
 
 /// Return a random “witty” tag line for --help
@@ -82,12 +86,18 @@ async fn main() -> Result<()> {
     }
 
     agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
+
     if let Some(task_file) = args.tasks {
         let task_file = tools::tasks::TaskFile::open(task_file.clone())
             .with_context(|| format!("{}", task_file.display()))?;
 
         task_file.inject_active_tasks(&mut agent);
         task_file.add_tools(&mut agent);
+    }
+
+    if let Some(worklog_dir) = args.worklogs {
+        let worklog_dir = tools::worklog::WorklogDirectory::new(worklog_dir);
+        worklog_dir.add_tools(&mut agent);
     }
 
     // Push the current time and date so the LLM knows what the timestamps mean
