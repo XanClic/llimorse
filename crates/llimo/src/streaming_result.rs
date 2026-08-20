@@ -223,9 +223,10 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
             }
         };
 
-        let Some(data) = line.trim().strip_prefix("data: ") else {
+        let Some(data) = line.trim().strip_prefix("data:") else {
             return self.do_poll_next(ctx);
         };
+        let data = data.trim_start();
 
         if data == "[DONE]" {
             self.stream.as_mut().project().terminate();
