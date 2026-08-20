@@ -183,7 +183,7 @@ impl fmt::Display for Task {
 
 impl fmt::Display for TaskSettable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "status={:?} ", self.status)?;
+        write!(f, "status={:?} prio={:?} ", self.status, self.priority)?;
         if let Some(ticket_url) = &self.ticket_url {
             write!(f, "ticket={ticket_url} ")?;
         }
