@@ -8,10 +8,11 @@ mod tools;
 
 use anyhow::{Context, Result};
 use app::WorkBuddy;
+use chrono::Local;
+use chrono::format::SecondsFormat;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::fs;
 use std::path::PathBuf;
-use tools::TodoFile;
 
 /// Command-line arguments for WorkBuddy
 #[derive(Parser)]
@@ -32,9 +33,9 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
-    /// To-do file path
+    /// Task file path
     #[arg(long)]
-    todo: Option<PathBuf>,
+    tasks: Option<PathBuf>,
 }
 
 /// Return a random “witty” tag line for --help
@@ -76,16 +77,24 @@ async fn main() -> Result<()> {
     let llm = llimo::Client::new(&args.llama_url);
     let mut agent = llimo::Agent::new(llm);
 
-    agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
-    if let Some(todo_file) = args.todo {
-        let todo_file = TodoFile::open(todo_file.clone())
-            .with_context(|| format!("{}", todo_file.display()))?;
-        todo_file.add_tools(&mut agent);
-    }
-
     if let Some(system_prompt) = system_prompt {
         agent.push_system(system_prompt);
     }
+
+    agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
+    if let Some(task_file) = args.tasks {
+        let task_file = tools::tasks::TaskFile::open(task_file.clone())
+            .with_context(|| format!("{}", task_file.display()))?;
+
+        task_file.inject_active_tasks(&mut agent);
+        task_file.add_tools(&mut agent);
+    }
+
+    // Push the current time and date so the LLM knows what the timestamps mean
+    agent.push_system(format!(
+        "The current date and time is {}",
+        Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
+    ));
 
     WorkBuddy::new(agent).run().await
 }

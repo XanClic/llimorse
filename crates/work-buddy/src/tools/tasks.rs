@@ -1,0 +1,502 @@
+//! Task list management
+
+use anyhow::{Result, anyhow};
+use chrono::Local;
+use chrono::format::SecondsFormat;
+use llimo::CallableTool;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt::{self, Write as _};
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Task file
+#[derive(Debug)]
+pub struct TaskFile {
+    /// Path where to load/store the content
+    path: PathBuf,
+
+    /// Content of the list
+    content: HashMap<String, Task>,
+}
+
+impl TaskFile {
+    /// Open the task file under the given `path`.
+    pub fn open(path: PathBuf) -> Result<Self> {
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let mut file = fs::File::create_new(&path).map_err(|c_err| {
+                    anyhow!("Opening file failed: {err}; and creating failed, too: {c_err}")
+                })?;
+
+                let content = String::from("{}");
+                file.write_all(content.as_bytes())?;
+                content
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let content = serde_json::from_str(&content)?;
+
+        Ok(TaskFile { path, content })
+    }
+
+    /// Inject the list of active tasks as system messages
+    pub fn inject_active_tasks(&self, agent: &mut llimo::Agent) {
+        let active_tasks = self
+            .content
+            .iter()
+            .filter(|(_, task)| task.settable.status != TaskStatus::Backlog);
+
+        let mut message = None::<String>;
+        for (id, task) in active_tasks {
+            let message = message.get_or_insert_with(|| "List of active tasks:".into());
+
+            let ticket = if let Some(ticket) = &task.settable.ticket_url {
+                ticket
+            } else {
+                "(does not have a public ticket yet)"
+            };
+
+            write!(
+                message,
+                "\n- '{id}' ({:?}, {:?} priority):\n  - {}\n  - Ticket: {ticket}\n  - Created: {}\n  - Last updated: {}",
+                task.settable.status,
+                task.settable.priority,
+                task.settable.description,
+                task.created_at,
+                task.updated_at,
+            )
+            .expect("Failed to append to task list string");
+        }
+
+        if let Some(message) = message {
+            agent.push_system(&message);
+        } else {
+            agent.push_system("(There are no active tasks.)");
+        }
+    }
+
+    /// Add relevant tools for this file to `agent`.
+    pub fn add_tools(self, agent: &mut llimo::Agent) {
+        let this = Arc::new(Mutex::new(self));
+
+        agent.add_tool(TaskAdd::new(Arc::clone(&this)));
+        agent.add_tool(TaskRemove::new(Arc::clone(&this)));
+        agent.add_tool(TaskEdit::new(Arc::clone(&this)));
+        agent.add_tool(TaskList::new(this));
+    }
+
+    /// Write the contents into the file.
+    fn write(&self) -> Result<()> {
+        let json = serde_json::to_string(&self.content)
+            .map_err(|err| anyhow!("Failed to convert task list to JSON: {err}"))?;
+
+        fs::write(&self.path, json)
+            .map_err(|err| anyhow!("Failed to write task list file: {err}"))?;
+
+        Ok(())
+    }
+}
+
+/// A task (ID is in the `HashMap`)
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct Task {
+    /// LLM-settable fields
+    #[serde(flatten)]
+    settable: TaskSettable,
+
+    /// When the task was first created
+    created_at: String,
+
+    /// When the task was last updated
+    updated_at: String,
+}
+
+/// The part of a task that is LLM-settable
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TaskSettable {
+    /// Task status (Backlog, NotYetTriaged, InProgress, Blocked)
+    status: TaskStatus,
+
+    /// Task priority (Low, Normal, High, Critical)
+    #[serde(default)]
+    priority: TaskPriority,
+
+    /// Ticket URL if any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ticket_url: Option<String>,
+
+    /// What there is to do
+    description: String,
+}
+
+/// The task’s status
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
+enum TaskStatus {
+    /// Not currently active, but planned for later, at some point
+    Backlog,
+
+    /// Completely new on the list, needs triaging first
+    NotYetTriaged,
+
+    /// Currently being worked on
+    InProgress,
+
+    /// Used to be worked on, but currently blocked by something (reason goes into the description)
+    Blocked,
+}
+
+/// The task’s priority
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Deserialize, Serialize, JsonSchema,
+)]
+enum TaskPriority {
+    /// Somewhere in the background, if there is time
+    Low,
+
+    /// Normal task priority
+    #[default]
+    Normal,
+
+    /// Elevated priority, is needed soon
+    High,
+
+    /// Absolutely critical priority, trounces everything else
+    Critical,
+}
+
+impl fmt::Display for Task {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} created_at={} updated_at={}",
+            self.settable, self.created_at, self.updated_at
+        )
+    }
+}
+
+impl fmt::Display for TaskSettable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "status={:?} ", self.status)?;
+        if let Some(ticket_url) = &self.ticket_url {
+            write!(f, "ticket={ticket_url} ")?;
+        }
+        if self.description.len() <= 50 {
+            write!(f, "desc={}", self.description)?;
+        } else {
+            write!(f, "desc={:.49}…", self.description)?;
+        }
+        Ok(())
+    }
+}
+
+llimo::tool! {
+    'name: "task_add";
+
+    /// Add a task to the task list.
+    #[derive(Debug)]
+    'params: pub struct TaskAddParams {
+        /// Meaningful ID to distinguish from other tasks
+        id: String,
+
+        /// Task to add
+        #[serde(flatten)]
+        task: TaskSettable,
+    }
+
+    /// Result of adding a new task.
+    #[derive(Debug)]
+    'result: pub struct TaskAddResult {
+        /// ID of the new task
+        id: String,
+    }
+
+    /// Add a task to the task list.
+    #[derive(Debug)]
+    'state: pub struct TaskAdd {
+        file: Arc<Mutex<TaskFile>>,
+    }
+}
+
+impl fmt::Display for TaskAddParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={} {}", self.id, self.task)
+    }
+}
+
+impl fmt::Display for TaskAddResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={}", self.id)
+    }
+}
+
+impl TaskAdd {
+    /// Create a task_add tool for the given file.
+    pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
+        TaskAdd { file }
+    }
+}
+
+impl CallableTool for TaskAdd {
+    async fn execute(&self, params: TaskAddParams) -> Result<TaskAddResult> {
+        let mut file = self.file.lock().await;
+
+        if file.content.contains_key(&params.id) {
+            return Err(anyhow!(
+                "Task with ID {} already exists in the task list",
+                params.id
+            ));
+        }
+
+        let now = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+        let task = Task {
+            settable: params.task.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        file.content.insert(params.id.clone(), task);
+
+        file.write()?;
+
+        Ok(TaskAddResult { id: params.id })
+    }
+}
+
+llimo::tool! {
+    'name: "task_remove";
+
+    /// Remove a task from the task list.
+    #[derive(Debug)]
+    'params: pub struct TaskRemoveParams {
+        /// ID of the task to remove
+        id: String,
+    }
+
+    /// Result of removing a task.
+    #[derive(Debug)]
+    'result: pub struct TaskRemoveResult {
+        /// ID of the removed task
+        id: String,
+    }
+
+    /// Remove a task from the task list.
+    #[derive(Debug)]
+    'state: pub struct TaskRemove {
+        file: Arc<Mutex<TaskFile>>,
+    }
+}
+
+impl fmt::Display for TaskRemoveParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={}", self.id)
+    }
+}
+
+impl fmt::Display for TaskRemoveResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={}", self.id)
+    }
+}
+
+impl TaskRemove {
+    /// Create a task_remove tool for the given file.
+    pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
+        TaskRemove { file }
+    }
+}
+
+impl CallableTool for TaskRemove {
+    async fn execute(&self, params: TaskRemoveParams) -> Result<TaskRemoveResult> {
+        let mut file = self.file.lock().await;
+
+        file.content
+            .remove(&params.id)
+            .ok_or_else(|| anyhow!("Task with ID {} does not exist in the task list", params.id))?;
+
+        file.write()?;
+
+        Ok(TaskRemoveResult { id: params.id })
+    }
+}
+
+llimo::tool! {
+    'name: "task_edit";
+
+    /// Edit an existing task on the task list.
+    #[derive(Debug)]
+    'params: pub struct TaskEditParams {
+        /// ID of the existing task on the list
+        id: String,
+
+        /// New task data
+        #[serde(flatten)]
+        task: TaskSettable,
+    }
+
+    /// Result of editing a task.
+    #[derive(Debug)]
+    'result: pub struct TaskEditResult {
+        /// ID of the task that has been edited
+        id: String,
+    }
+
+    /// Edit an existing task on the task list.
+    #[derive(Debug)]
+    'state: pub struct TaskEdit {
+        file: Arc<Mutex<TaskFile>>,
+    }
+}
+
+impl fmt::Display for TaskEditParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={} {}", self.id, self.task)
+    }
+}
+
+impl fmt::Display for TaskEditResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "id={}", self.id)
+    }
+}
+
+impl TaskEdit {
+    /// Create a task_edit tool for the given file.
+    pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
+        TaskEdit { file }
+    }
+}
+
+impl CallableTool for TaskEdit {
+    async fn execute(&self, params: TaskEditParams) -> Result<TaskEditResult> {
+        let mut file = self.file.lock().await;
+
+        let task = file
+            .content
+            .get_mut(&params.id)
+            .ok_or_else(|| anyhow!("Task with ID {} does not exist in the task list", params.id))?;
+
+        task.settable = params.task;
+        task.updated_at = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+
+        file.write()?;
+
+        Ok(TaskEditResult { id: params.id })
+    }
+}
+
+llimo::tool! {
+    'name: "task_list";
+
+    /// List existing tasks on the task list.
+    #[derive(Debug)]
+    'params: pub struct TaskListParams {
+        /// Query specific task IDs
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ids: Option<Vec<String>>,
+
+        /// List only tasks with one of these statuses
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<Vec<TaskStatus>>,
+
+        /// List only tasks with at least this priority
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_priority: Option<TaskPriority>,
+    }
+
+    /// Tasks on the task list, as requested.
+    #[derive(Debug)]
+    'result: pub struct TaskListResult {
+        /// The full task list, keyed by ID
+        #[serde(flatten)]
+        list: HashMap<String, Task>,
+    }
+
+    /// List existing tasks on the task list.
+    #[derive(Debug)]
+    'state: pub struct TaskList {
+        file: Arc<Mutex<TaskFile>>,
+    }
+}
+
+impl fmt::Display for TaskListParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut display = Vec::with_capacity(3);
+
+        if let Some(ids) = &self.ids {
+            display.push(format!("id in {ids:?}"));
+        }
+
+        if let Some(status) = &self.status {
+            display.push(format!("status in {status:?}"));
+        }
+
+        if let Some(min_priority) = &self.min_priority {
+            display.push(format!("priority >= {min_priority:?}"));
+        }
+
+        write!(f, "{}", display.join("; "))
+    }
+}
+
+impl fmt::Display for TaskListResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count = self.list.len();
+        for (i, (id, task)) in self.list.iter().enumerate() {
+            if i == count - 1 {
+                write!(f, "{id}={{{task}}}")?;
+            } else {
+                write!(f, "{id}={{{task}}}; ")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl TaskList {
+    /// Create a task_list tool for the given file.
+    pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
+        TaskList { file }
+    }
+}
+
+impl CallableTool for TaskList {
+    async fn execute(&self, params: TaskListParams) -> Result<TaskListResult> {
+        let file = self.file.lock().await;
+
+        let list = file
+            .content
+            .iter()
+            .filter(|(id, task)| {
+                if let Some(ids) = &params.ids
+                    && !ids.contains(id)
+                {
+                    return false;
+                }
+
+                if let Some(status) = &params.status
+                    && !status.contains(&task.settable.status)
+                {
+                    return false;
+                }
+
+                if let Some(min_priority) = &params.min_priority
+                    && task.settable.priority < *min_priority
+                {
+                    return false;
+                }
+
+                true
+            })
+            .map(|(id, task)| (id.clone(), task.clone()))
+            .collect();
+
+        Ok(TaskListResult { list })
+    }
+}

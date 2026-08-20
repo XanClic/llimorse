@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+chrono = "0.4"
 clap.workspace = true
 color-eyre = "0.6"
 crossterm = { version = "0.29", features = ["event-stream"] }
