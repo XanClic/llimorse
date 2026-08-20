@@ -140,11 +140,11 @@ pub struct ChatCompletion<'a> {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StreamOptions {
     /// Something about obfuscating against side-channel attacks
-    #[serde(default, skip_serializing_if = "Clone::clone")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_obfuscation: bool,
 
     /// Provide token usage information before `[DONE]`
-    #[serde(default, skip_serializing_if = "Clone::clone")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_usage: bool,
 }
 
