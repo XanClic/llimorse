@@ -138,6 +138,7 @@ struct TaskSettable {
 
 /// The task’s status
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(inline)]
 enum TaskStatus {
     /// Not currently active, but planned for later, at some point
     Backlog,
@@ -156,6 +157,7 @@ enum TaskStatus {
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Deserialize, Serialize, JsonSchema,
 )]
+#[schemars(inline)]
 enum TaskPriority {
     /// Somewhere in the background, if there is time
     Low,

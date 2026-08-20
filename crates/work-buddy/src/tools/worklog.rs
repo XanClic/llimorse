@@ -68,29 +68,31 @@ struct WorklogSettableEntry {
 /// Persistent and globally reachable references of work
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[schemars(inline)]
 enum WorklogReference {
     /// Gitlab work items, github issues, Jira tickets, ...
-    Issue(
+    Issue {
         /// URL linking to the issue
-        String,
-    ),
+        url: String,
+    },
 
     /// Github pull requests, gitlab merge requests, ...
-    MergeRequest(
+    MergeRequest {
         /// URL linking to the MR/PR
-        String,
-    ),
+        url: String,
+    },
 
     /// Commit in a repository noted in `components`
-    Commit(
+    Commit {
         /// The commit hash
-        String,
-    ),
+        hash: String,
+    },
 }
 
 /// Tags for worklog items
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(inline)]
 enum WorklogTag {
     /// A bug to be fixed
     Bug,
