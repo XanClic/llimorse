@@ -8,8 +8,8 @@ mod tools;
 
 use anyhow::{Context, Result};
 use app::WorkBuddy;
-use chrono::Local;
 use chrono::format::SecondsFormat;
+use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::fs;
 use std::path::PathBuf;
@@ -101,9 +101,11 @@ async fn main() -> Result<()> {
     }
 
     // Push the current time and date so the LLM knows what the timestamps mean
+    let now = Local::now();
     agent.push_system(format!(
-        "The current date and time is {}",
-        Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
+        "The current date and time is {}, {}",
+        now.weekday(),
+        now.to_rfc3339_opts(SecondsFormat::Secs, false)
     ));
 
     WorkBuddy::new(agent).run().await
