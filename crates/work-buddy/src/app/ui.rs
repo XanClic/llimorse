@@ -104,17 +104,48 @@ impl TermState {
         Ok(())
     }
 
+    /// Scroll the chat history window up by the given number of lines.
+    fn scroll_up(&mut self, lines: usize) {
+        let history_len = self.chat_history.lock().unwrap().lines().len();
+
+        if self.history_scroll.0 == usize::MAX {
+            self.history_scroll.0 = history_len.saturating_sub(self.history_lines_on_screen);
+        }
+        self.history_scroll -= lines;
+    }
+
+    /// Scroll the chat history window down by the given number of lines.
+    fn scroll_down(&mut self, lines: usize) {
+        let history_len = self.chat_history.lock().unwrap().lines().len();
+
+        self.history_scroll += lines;
+        if self.history_scroll.0 >= history_len.saturating_sub(self.history_lines_on_screen) {
+            self.history_scroll.0 = usize::MAX;
+        }
+    }
+
     /// Handle the given keyboard event.
     fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<Event>> {
         if event.kind == ct::KeyEventKind::Press {
-            if event.code == ct::KeyCode::Enter && event.modifiers.is_empty() {
-                if !self.input_area.is_empty() {
+            match event.code {
+                ct::KeyCode::Enter if event.modifiers.is_empty() && !self.input_area.is_empty() => {
                     let message = self.input_area.lines().join("\n");
                     self.input_area.clear();
                     return Ok(Some(Event::Input(message)));
                 }
-            } else if event.code == ct::KeyCode::Esc {
-                return Ok(Some(Event::Exit));
+
+                ct::KeyCode::Esc => return Ok(Some(Event::Exit)),
+
+                ct::KeyCode::PageUp => {
+                    self.scroll_up((self.history_lines_on_screen + 1) / 2);
+                    return Ok(None);
+                }
+                ct::KeyCode::PageDown => {
+                    self.scroll_down((self.history_lines_on_screen + 1) / 2);
+                    return Ok(None);
+                }
+
+                _ => (),
             }
         }
 
@@ -124,25 +155,9 @@ impl TermState {
 
     /// Handle the given mouse event.
     fn handle_mouse_event(&mut self, event: ct::MouseEvent) -> Result<Option<Event>> {
-        let history_len = self.chat_history.lock().unwrap().lines().len();
-
         match event.kind {
-            ct::MouseEventKind::ScrollDown => {
-                self.history_scroll += 1;
-                if self.history_scroll.0 >= history_len.saturating_sub(self.history_lines_on_screen)
-                {
-                    self.history_scroll.0 = usize::MAX;
-                }
-            }
-
-            ct::MouseEventKind::ScrollUp => {
-                if self.history_scroll.0 == usize::MAX {
-                    self.history_scroll.0 =
-                        history_len.saturating_sub(self.history_lines_on_screen + 1);
-                } else {
-                    self.history_scroll -= 1;
-                }
-            }
+            ct::MouseEventKind::ScrollDown => self.scroll_down(1),
+            ct::MouseEventKind::ScrollUp => self.scroll_up(1),
 
             _ => (),
         }
