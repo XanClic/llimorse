@@ -96,8 +96,8 @@ below in *ASK FATTENING QUESTIONS*.
 
 ## What you know at startup
 
-You've been given the current state of all open tasks, recent completed tasks,
-and the TODO list. Refer to these naturally — "last time you mentioned the auth
+You've been given the current state of all currently active tasks (without the
+open backlog). Refer to these naturally — "last time you mentioned the auth
 token thing was still open, is that what you're picking up?" — but don't recite
 the whole list unprompted. Let them lead.
 
