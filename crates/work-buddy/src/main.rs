@@ -44,6 +44,10 @@ struct Args {
     /// Allow the LLM to create markdown files in this directory
     #[arg(long)]
     markdown_output: Option<PathBuf>,
+
+    /// JSON knowledge file to explain keywords (e.g. projects) and such
+    #[arg(long)]
+    knowledge: Option<PathBuf>,
 }
 
 /// Return a random “witty” tag line for --help
@@ -106,6 +110,13 @@ async fn main() -> Result<()> {
 
     if let Some(markdown_dir) = args.markdown_output {
         agent.add_tool(tools::write_md::WriteMarkdown::new(markdown_dir));
+    }
+
+    if let Some(knowledge_file) = args.knowledge {
+        let knowledge_file = tools::knowledge::KnowledgeFile::open(knowledge_file.clone())
+            .with_context(|| format!("{}", knowledge_file.display()))?;
+
+        knowledge_file.add_tools(&mut agent);
     }
 
     // Push the current time and date so the LLM knows what the timestamps mean
