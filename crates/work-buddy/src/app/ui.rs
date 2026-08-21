@@ -87,6 +87,7 @@ impl TermState {
         };
 
         match result? {
+            ct::Event::Paste(text) => self.handle_paste_event(text),
             ct::Event::Key(key) => self.handle_key_event(key),
             ct::Event::Mouse(mouse) => self.handle_mouse_event(mouse),
             _ => Ok(None),
@@ -162,6 +163,14 @@ impl TermState {
             _ => (),
         }
 
+        Ok(None)
+    }
+
+    /// Handle clipboard pasting.
+    fn handle_paste_event(&mut self, text: String) -> Result<Option<Event>> {
+        // Normalize line endings: `ratatui_textarea::TextArea::insert_str()` does not handle \r.
+        let text = text.replace("\r\n", "\n").replace("\r", "\n");
+        self.input_area.insert_str(&text);
         Ok(None)
     }
 
@@ -257,14 +266,22 @@ impl Drop for TermState {
 fn set_up_term() {
     if TERM_SET_UP.fetch_add(1, Ordering::Relaxed) == 0 {
         color_eyre::install().expect("Failed to install crash handler");
-        let _ = crossterm::execute!(io::stdout(), ct::EnableMouseCapture);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            ct::EnableBracketedPaste,
+            ct::EnableMouseCapture
+        );
     }
 }
 
 /// Basic terminal tear-down
 fn tear_down_term() {
     if TERM_SET_UP.fetch_sub(1, Ordering::Relaxed) == 1 {
-        let _ = crossterm::execute!(io::stdout(), ct::DisableMouseCapture);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            ct::DisableBracketedPaste,
+            ct::DisableMouseCapture
+        );
         ratatui::restore();
     }
 }
