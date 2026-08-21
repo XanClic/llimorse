@@ -51,6 +51,12 @@ impl WorkBuddyAgent {
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
     async fn do_run(&mut self, mut agent: llimo::Agent) -> Result<()> {
         while let Some(message) = self.user_message_submit.recv().await {
+            // The main loop will push an empty message to remind us to check the exit flag, so do
+            // that here
+            if self.exit.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
             self.push_history(&message, HistoryEntryType::User);
             agent.push_user(message);
             while let Ok(message) = self.user_message_submit.try_recv() {
