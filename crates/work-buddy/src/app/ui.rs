@@ -4,15 +4,15 @@ use super::history::ChatHistory;
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{DefaultTerminal, Frame};
-use std::io;
 use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{cmp, io};
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
 static TERM_SET_UP: AtomicUsize = AtomicUsize::new(0);
@@ -213,7 +213,21 @@ impl TermState {
             chat_history.token_usage().1 as f32 * 1.0e-3
         )));
 
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        let history_len = chat_history.lines().len();
+        let scroll_len = history_len - history_lines_on_screen;
+        let mut scrollbar_state =
+            ScrollbarState::new(scroll_len).position(cmp::min(scroll, scroll_len));
+
         frame.render_widget(paragraph, history_cell);
+        frame.render_stateful_widget(
+            scrollbar,
+            history_cell.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
         frame.render_widget(&self.input_area, input_cell);
     }
 }
