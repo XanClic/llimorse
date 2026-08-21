@@ -89,7 +89,7 @@ impl TaskFile {
         agent.add_tool(TaskAdd::new(Arc::clone(&this)));
         agent.add_tool(TaskRemove::new(Arc::clone(&this)));
         agent.add_tool(TaskEdit::new(Arc::clone(&this)));
-        agent.add_tool(TaskList::new(this));
+        agent.add_tool(TaskQuery::new(this));
     }
 
     /// Write the contents into the file.
@@ -393,11 +393,11 @@ impl CallableTool for TaskEdit {
 }
 
 llimo::tool! {
-    'name: "task_list";
+    'name: "task_query";
 
-    /// List existing tasks on the task list.
+    /// Query tasks from the list of *all* tasks.
     #[derive(Debug)]
-    'params: pub struct TaskListParams {
+    'params: pub struct TaskQueryParams {
         /// Query specific task IDs
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ids: Option<Vec<String>>,
@@ -413,20 +413,20 @@ llimo::tool! {
 
     /// Tasks on the task list, as requested.
     #[derive(Debug)]
-    'result: pub struct TaskListResult {
-        /// The full task list, keyed by ID
+    'result: pub struct TaskQueryResult {
+        /// Matching tasks from the task list, keyed by ID
         #[serde(flatten)]
         list: HashMap<String, Task>,
     }
 
-    /// List existing tasks on the task list.
+    /// Query tasks from the list of *all* tasks.
     #[derive(Debug)]
-    'state: pub struct TaskList {
+    'state: pub struct TaskQuery {
         file: Arc<Mutex<TaskFile>>,
     }
 }
 
-impl fmt::Display for TaskListParams {
+impl fmt::Display for TaskQueryParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut display = Vec::with_capacity(3);
 
@@ -446,7 +446,7 @@ impl fmt::Display for TaskListParams {
     }
 }
 
-impl fmt::Display for TaskListResult {
+impl fmt::Display for TaskQueryResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let count = self.list.len();
         for (i, (id, task)) in self.list.iter().enumerate() {
@@ -461,15 +461,15 @@ impl fmt::Display for TaskListResult {
     }
 }
 
-impl TaskList {
-    /// Create a task_list tool for the given file.
+impl TaskQuery {
+    /// Create a task_query tool for the given file.
     pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
-        TaskList { file }
+        TaskQuery { file }
     }
 }
 
-impl CallableTool for TaskList {
-    async fn execute(&self, params: TaskListParams) -> Result<TaskListResult> {
+impl CallableTool for TaskQuery {
+    async fn execute(&self, params: TaskQueryParams) -> Result<TaskQueryResult> {
         let file = self.file.lock().await;
 
         let list = file
@@ -499,6 +499,6 @@ impl CallableTool for TaskList {
             .map(|(id, task)| (id.clone(), task.clone()))
             .collect();
 
-        Ok(TaskListResult { list })
+        Ok(TaskQueryResult { list })
     }
 }
