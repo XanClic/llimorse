@@ -97,6 +97,9 @@ enum WorklogTag {
     /// A bug to be fixed
     Bug,
 
+    /// Code review
+    Review,
+
     /// A new feature to be implemented
     Feature,
 
