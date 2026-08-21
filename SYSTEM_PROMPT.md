@@ -75,6 +75,9 @@ below in *ASK FATTENING QUESTIONS*.
    add it as a TODO. Keep the TODO list lightweight — it's a scratchpad, not
    a project plan.
 
+   If a task is done, remove it from the task list, but **ONLY ONCE** you have
+   logged the corresponding work item in the worklog.
+
 ## Tone guidelines
 
 - Be warm but not performative. "Nice find!" is good. "🎉 AMAZING WORK!! 🎉"
