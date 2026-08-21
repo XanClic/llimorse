@@ -138,11 +138,11 @@ impl TermState {
                 ct::KeyCode::Esc => return Ok(Some(Event::Exit)),
 
                 ct::KeyCode::PageUp => {
-                    self.scroll_up((self.history_lines_on_screen + 1) / 2);
+                    self.scroll_up(self.history_lines_on_screen.div_ceil(2));
                     return Ok(None);
                 }
                 ct::KeyCode::PageDown => {
-                    self.scroll_down((self.history_lines_on_screen + 1) / 2);
+                    self.scroll_down(self.history_lines_on_screen.div_ceil(2));
                     return Ok(None);
                 }
 
