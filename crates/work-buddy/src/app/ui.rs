@@ -4,6 +4,10 @@ use super::history::ChatHistory;
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::text::Text;
+use ratatui::widgets::{Block, Paragraph};
+use ratatui::{DefaultTerminal, Frame};
 use std::io;
 use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +25,7 @@ pub struct TermState {
     /// to this. (Well, “for some reason” is that it found it clever to have a `term.do(|x| ...)`
     /// pattern for rendering, so if we want access to `self` in that callback, we cannot have
     /// `term` stored here.)
-    term: Option<ratatui::DefaultTerminal>,
+    term: Option<DefaultTerminal>,
 
     /// Produces terminal events, asynchronously
     events: ct::EventStream,
@@ -56,7 +60,7 @@ impl TermState {
 
         let mut input_area: ratatui_textarea::TextArea<'static> = Default::default();
         input_area.set_cursor_line_style(Default::default());
-        input_area.set_block(ratatui::widgets::Block::bordered().title("Input"));
+        input_area.set_block(Block::bordered().title("Input"));
         input_area.set_wrap_mode(ratatui_textarea::WrapMode::Word);
 
         TermState {
@@ -147,13 +151,10 @@ impl TermState {
     }
 
     /// Render the current state onto the screen.
-    fn render(&mut self, frame: &mut ratatui::Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let layout = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Percentage(100),
-            ratatui::layout::Constraint::Min(5),
-        ])
-        .split(area);
+        let layout =
+            Layout::vertical([Constraint::Percentage(100), Constraint::Min(5)]).split(area);
 
         let history_cell = layout[0];
         let input_cell = layout[1];
@@ -200,19 +201,17 @@ impl TermState {
 
         self.history_lines_on_screen = history_lines_on_screen;
 
-        let paragraph_content = ratatui::text::Text {
+        let paragraph_content = Text {
             alignment: None,
             style: Default::default(),
             lines: history_lines,
         };
 
-        let paragraph = ratatui::widgets::Paragraph::new(paragraph_content).block(
-            ratatui::widgets::Block::bordered().title(format!(
-                "Chat: {:.1}k+{:.1}k",
-                chat_history.token_usage().0 as f32 * 1.0e-3,
-                chat_history.token_usage().1 as f32 * 1.0e-3
-            )),
-        );
+        let paragraph = Paragraph::new(paragraph_content).block(Block::bordered().title(format!(
+            "Chat: {:.1}k+{:.1}k",
+            chat_history.token_usage().0 as f32 * 1.0e-3,
+            chat_history.token_usage().1 as f32 * 1.0e-3
+        )));
 
         frame.render_widget(paragraph, history_cell);
         frame.render_widget(&self.input_area, input_cell);
