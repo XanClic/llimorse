@@ -5,14 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 chrono = "0.4"
 clap.workspace = true
 fastrand = "2"
-futures.workspace = true
 llimo.workspace = true
 llimo-chat.workspace = true
-reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -5,20 +5,10 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
-clap.workspace = true
 color-eyre = "0.6"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures.workspace = true
 llimo-chat.workspace = true
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = "0.9"
-pin-project = "1"
-reqwest.workspace = true
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 textwrap = "0.16"
-tokio.workspace = true
-tracing.workspace = true
-urlencoding = "2"
