@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc};
 
-/// State of the agent-running part of WorkBuddy
-pub(super) struct WorkBuddyAgent {
+/// State of the agent-running part of the llimo-based chat application
+pub(super) struct ChatAgent {
     /// The chat history as shared with the agent
     chat_history: Arc<Mutex<ChatHistory>>,
 
@@ -23,7 +23,7 @@ pub(super) struct WorkBuddyAgent {
     exit: Arc<AtomicBool>,
 }
 
-impl WorkBuddyAgent {
+impl ChatAgent {
     /// Create a new instance.
     pub fn new(
         chat_history: Arc<Mutex<ChatHistory>>,
@@ -31,7 +31,7 @@ impl WorkBuddyAgent {
         update_ui: Arc<Notify>,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        WorkBuddyAgent {
+        ChatAgent {
             chat_history,
             user_message_submit,
             update_ui,

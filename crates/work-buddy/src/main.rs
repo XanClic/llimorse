@@ -3,16 +3,15 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-mod app;
 mod tools;
 
 use anyhow::{Context, Result};
-use app::WorkBuddy;
 use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::fs;
 use std::path::PathBuf;
+use term_ui::TermUi;
 
 /// Command-line arguments for WorkBuddy
 #[derive(Parser)]
@@ -127,5 +126,7 @@ async fn main() -> Result<()> {
         now.to_rfc3339_opts(SecondsFormat::Secs, false)
     ));
 
-    WorkBuddy::new(agent).run().await
+    llimo_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
+        .run()
+        .await
 }

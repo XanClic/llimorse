@@ -1,24 +1,29 @@
 //! UI part of the WorkBuddy application
 
-use super::history::ChatHistory;
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
-use ratatui::layout::{Constraint, Layout, Margin};
+use llimo_chat::history::HistoryEntryType;
+use llimo_chat::{ChatHistory, ui};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin};
+use ratatui::style::Style;
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{DefaultTerminal, Frame};
+use std::borrow::Cow;
 use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::{cmp, io};
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
 static TERM_SET_UP: AtomicUsize = AtomicUsize::new(0);
 
 /// UI state for WorkBuddy
-pub struct TermState {
+pub struct TermUi {
     /// ratatui terminal object
     ///
     /// Always set, except during rendering, because for some reason ratatui needs ownership access
@@ -43,16 +48,7 @@ pub struct TermState {
     input_area: ratatui_textarea::TextArea<'static>,
 }
 
-/// Application state level events that can come from the UI
-pub enum Event {
-    /// Exit requested
-    Exit,
-
-    /// User submitted a message as input
-    Input(String),
-}
-
-impl TermState {
+impl TermUi {
     /// Create the term state with `chat_history`
     pub fn new(chat_history: Arc<Mutex<ChatHistory>>) -> Self {
         let term = ratatui::init();
@@ -63,34 +59,13 @@ impl TermState {
         input_area.set_block(Block::bordered().title("Input"));
         input_area.set_wrap_mode(ratatui_textarea::WrapMode::Word);
 
-        TermState {
+        TermUi {
             term: Some(term),
             events: ct::EventStream::new(),
             chat_history,
             history_scroll: Saturating(usize::MAX),
             history_lines_on_screen: 0,
             input_area,
-        }
-    }
-
-    /// Handle input on the terminal, with the given `poll_timeout`.
-    pub async fn handle_term_input(&mut self, poll_timeout: Duration) -> Result<Option<Event>> {
-        let result = tokio::time::timeout(poll_timeout, self.events.next()).await;
-        let Ok(result) = result else {
-            // Timeout means no event available, which is fine
-            return Ok(None);
-        };
-
-        let Some(result) = result else {
-            // Stream ended
-            return Ok(Some(Event::Exit));
-        };
-
-        match result? {
-            ct::Event::Paste(text) => self.handle_paste_event(text),
-            ct::Event::Key(key) => self.handle_key_event(key),
-            ct::Event::Mouse(mouse) => self.handle_mouse_event(mouse),
-            _ => Ok(None),
         }
     }
 
@@ -126,16 +101,16 @@ impl TermState {
     }
 
     /// Handle the given keyboard event.
-    fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<Event>> {
+    fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<ui::Event>> {
         if event.kind == ct::KeyEventKind::Press {
             match event.code {
                 ct::KeyCode::Enter if event.modifiers.is_empty() && !self.input_area.is_empty() => {
                     let message = self.input_area.lines().join("\n");
                     self.input_area.clear();
-                    return Ok(Some(Event::Input(message)));
+                    return Ok(Some(ui::Event::Input(message)));
                 }
 
-                ct::KeyCode::Esc => return Ok(Some(Event::Exit)),
+                ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
 
                 ct::KeyCode::PageUp => {
                     self.scroll_up(self.history_lines_on_screen.div_ceil(2));
@@ -155,7 +130,7 @@ impl TermState {
     }
 
     /// Handle the given mouse event.
-    fn handle_mouse_event(&mut self, event: ct::MouseEvent) -> Result<Option<Event>> {
+    fn handle_mouse_event(&mut self, event: ct::MouseEvent) -> Result<Option<ui::Event>> {
         match event.kind {
             ct::MouseEventKind::ScrollDown => self.scroll_down(1),
             ct::MouseEventKind::ScrollUp => self.scroll_up(1),
@@ -167,7 +142,7 @@ impl TermState {
     }
 
     /// Handle clipboard pasting.
-    fn handle_paste_event(&mut self, text: String) -> Result<Option<Event>> {
+    fn handle_paste_event(&mut self, text: String) -> Result<Option<ui::Event>> {
         // Normalize line endings: `ratatui_textarea::TextArea::insert_str()` does not handle \r.
         let text = text.replace("\r\n", "\n").replace("\r", "\n");
         self.input_area.insert_str(&text);
@@ -191,7 +166,7 @@ impl TermState {
         let scroll = self.history_scroll.0;
 
         let history_lines = if scroll == usize::MAX {
-            let mut history_lines = ChatHistory::into_ratatui_lines(
+            let mut history_lines = history_into_ratatui_lines(
                 chat_history
                     .lines()
                     .iter()
@@ -208,7 +183,7 @@ impl TermState {
             history_lines.reverse();
             history_lines
         } else {
-            ChatHistory::into_ratatui_lines(
+            history_into_ratatui_lines(
                 chat_history
                     .lines()
                     .iter()
@@ -256,7 +231,34 @@ impl TermState {
     }
 }
 
-impl Drop for TermState {
+impl ui::UiState for TermUi {
+    type Error = anyhow::Error;
+
+    /// Handle input on the terminal, and redraw
+    async fn get_event(&mut self) -> Result<ui::Event> {
+        self.draw()?;
+
+        while let Some(result) = self.events.next().await {
+            let event = match result? {
+                ct::Event::Paste(text) => self.handle_paste_event(text),
+                ct::Event::Key(key) => self.handle_key_event(key),
+                ct::Event::Mouse(mouse) => self.handle_mouse_event(mouse),
+                _ => Ok(None),
+            };
+
+            self.draw()?;
+
+            if let Some(event) = event? {
+                return Ok(event);
+            }
+        }
+
+        // Stream ended
+        Ok(ui::Event::Exit)
+    }
+}
+
+impl Drop for TermUi {
     fn drop(&mut self) {
         tear_down_term();
     }
@@ -283,5 +285,38 @@ fn tear_down_term() {
             ct::DisableMouseCapture
         );
         ratatui::restore();
+    }
+}
+
+/// Helper function to convert the given iterator of `HistoryEntryType`-annotated lines into
+/// ratatui lines.
+fn history_into_ratatui_lines<'a, I: Iterator<Item = (Cow<'a, str>, HistoryEntryType)>>(
+    iter: I,
+) -> Vec<ratatui::text::Line<'a>> {
+    iter.map(|line| {
+        let (style, alignment) = ratatui_style(line.1);
+
+        ratatui::text::Line {
+            style,
+            alignment: Some(alignment),
+            spans: vec![ratatui::text::Span {
+                style: Default::default(),
+                content: line.0,
+            }],
+        }
+    })
+    .collect()
+}
+
+/// Converts a `HistoryEntryType` into the corresponding ratatui styles
+fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
+    match het {
+        HistoryEntryType::Empty => (Style::default(), Alignment::Left),
+        HistoryEntryType::User => (Style::default().bold().magenta(), Alignment::Right),
+        HistoryEntryType::Content => (Style::default().bold(), Alignment::Left),
+        HistoryEntryType::Reasoning => (Style::default().italic(), Alignment::Left),
+        HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
+        HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
+        HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
     }
 }
