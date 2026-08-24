@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod history;
+pub mod log;
 pub mod ui;
 
 use agent::ChatAgent;

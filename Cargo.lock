@@ -1385,7 +1385,10 @@ dependencies = [
  "anyhow",
  "futures",
  "llimo",
+ "serde",
+ "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
