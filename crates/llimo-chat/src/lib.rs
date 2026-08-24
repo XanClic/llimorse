@@ -12,6 +12,7 @@ use agent::ChatAgent;
 use anyhow::Result;
 use futures::FutureExt;
 pub use history::ChatHistory;
+use llimo::{Agent, ChatListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -38,8 +39,11 @@ pub struct App<I: UiState> {
 
 impl<I: UiState> App<I> {
     /// Create a new application state around `agent`.
-    pub fn new<F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>>(
-        agent: llimo::Agent,
+    pub fn new<
+        L: ChatListener + Send + 'static,
+        F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>,
+    >(
+        agent: Agent<L>,
         create_ui: F,
     ) -> Result<Self> {
         let chat_history = Arc::new(Mutex::new(ChatHistory::default()));
