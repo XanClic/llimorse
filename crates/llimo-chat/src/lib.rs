@@ -12,6 +12,7 @@ use agent::ChatAgent;
 use anyhow::Result;
 use futures::FutureExt;
 pub use history::ChatHistory;
+use llimo::line_format::ChatMessage;
 use llimo::{Agent, ChatListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,15 +39,22 @@ pub struct App<I: UiState> {
 }
 
 impl<I: UiState> App<I> {
-    /// Create a new application state around `agent`.
-    pub fn new<
+    /// Create a new application state around `agent`, pre-feeding the chat log with `history`.
+    pub fn new_with_history<
         L: ChatListener + Send + 'static,
         F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>,
     >(
-        agent: Agent<L>,
+        mut agent: Agent<L>,
+        history: &[ChatMessage],
         create_ui: F,
     ) -> Result<Self> {
-        let chat_history = Arc::new(Mutex::new(ChatHistory::default()));
+        let mut chat_history = ChatHistory::default();
+        for message in history {
+            chat_history.push_raw(&agent, message);
+        }
+        chat_history.force_resolve_unresolved_tool_calls(&mut agent);
+
+        let chat_history = Arc::new(Mutex::new(chat_history));
         let exit = Arc::new(AtomicBool::new(false));
 
         let ui = create_ui(Arc::clone(&chat_history))?;
@@ -82,6 +90,17 @@ impl<I: UiState> App<I> {
 
             exit,
         })
+    }
+
+    /// Create a new application state around `agent`.
+    pub fn new<
+        L: ChatListener + Send + 'static,
+        F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>,
+    >(
+        agent: Agent<L>,
+        create_ui: F,
+    ) -> Result<Self> {
+        Self::new_with_history(agent, &[], create_ui)
     }
 
     /// Run the application until it finds it should exit.
