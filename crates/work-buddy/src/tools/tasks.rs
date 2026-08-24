@@ -57,20 +57,34 @@ impl TaskFile {
         for (id, task) in active_tasks {
             let message = message.get_or_insert_with(|| "List of active tasks:".into());
 
-            let ticket = if let Some(ticket) = &task.settable.ticket_url {
-                ticket
-            } else {
-                "(does not have a public ticket yet)"
-            };
+            write!(
+                message,
+                "\n- '{id}' ({:?}, {:?} priority):\n",
+                task.settable.status, task.settable.priority,
+            )
+            .expect("Failed to append to task list string");
+
+            for (list, header, inline_name) in [
+                (&task.settable.description, "Description", "description"),
+                (&task.settable.tickets, "Tickets", "public tickets"),
+            ] {
+                if list.is_empty() {
+                    writeln!(message, "  - (does not have any {inline_name} yet)")
+                        .expect("Failed to append to task list string");
+                } else {
+                    writeln!(message, "  - {header}:")
+                        .expect("Failed to append to task list string");
+                    for (key, value) in list {
+                        writeln!(message, "    - {key}: {value}")
+                            .expect("Failed to append to task list string");
+                    }
+                }
+            }
 
             write!(
                 message,
-                "\n- '{id}' ({:?}, {:?} priority):\n  - {}\n  - Ticket: {ticket}\n  - Created: {}\n  - Last updated: {}",
-                task.settable.status,
-                task.settable.priority,
-                task.settable.description,
-                task.created_at,
-                task.updated_at,
+                "  - Created: {}\n  - Last updated: {}",
+                task.created_at, task.updated_at,
             )
             .expect("Failed to append to task list string");
         }
@@ -88,7 +102,7 @@ impl TaskFile {
 
         agent.add_tool(TaskAdd::new(Arc::clone(&this)));
         agent.add_tool(TaskRemove::new(Arc::clone(&this)));
-        agent.add_tool(TaskEdit::new(Arc::clone(&this)));
+        agent.add_tool(TaskUpdate::new(Arc::clone(&this)));
         agent.add_tool(TaskQuery::new(this));
     }
 
@@ -121,19 +135,20 @@ struct Task {
 /// The part of a task that is LLM-settable
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct TaskSettable {
-    /// Task status (Backlog, NotYetTriaged, InProgress, Blocked)
+    /// Task status
     status: TaskStatus,
 
-    /// Task priority (Low, Normal, High, Critical)
+    /// Task priority
     #[serde(default)]
     priority: TaskPriority,
 
-    /// Ticket URL if any
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    ticket_url: Option<String>,
+    /// Ticket URLs
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    tickets: HashMap<String, String>,
 
-    /// What there is to do
-    description: String,
+    /// What there is to do, keyed by keywords (to allow information to be added over time)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    description: HashMap<String, String>,
 }
 
 /// The task’s status
@@ -185,15 +200,23 @@ impl fmt::Display for Task {
 
 impl fmt::Display for TaskSettable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "status={:?} prio={:?} ", self.status, self.priority)?;
-        if let Some(ticket_url) = &self.ticket_url {
-            write!(f, "ticket={ticket_url} ")?;
+        write!(f, "status={:?} prio={:?}", self.status, self.priority)?;
+
+        for (map, title) in [(&self.tickets, "tickets"), (&self.description, "desc")] {
+            write!(f, " {title}=[")?;
+            let len = map.len();
+            for (i, (key, value)) in map.iter().enumerate() {
+                let separator = if i == len - 1 { "" } else { ", " };
+
+                if value.len() <= 50 {
+                    write!(f, "{key}={value:?}{separator}")?;
+                } else {
+                    write!(f, "{key}=\"{value:.49}…\"{separator}")?;
+                }
+            }
+            write!(f, "]")?;
         }
-        if self.description.len() <= 50 {
-            write!(f, "desc={}", self.description)?;
-        } else {
-            write!(f, "desc={:.49}…", self.description)?;
-        }
+
         Ok(())
     }
 }
@@ -328,54 +351,94 @@ impl CallableTool for TaskRemove {
 }
 
 llimo::tool! {
-    'name: "task_edit";
+    'name: "task_update";
 
-    /// Edit an existing task on the task list.
+    /// Update/edit an existing task on the task list.
     #[derive(Debug)]
-    'params: pub struct TaskEditParams {
+    'params: pub struct TaskUpdateParams {
         /// ID of the existing task on the list
         id: String,
 
-        /// New task data
-        #[serde(flatten)]
-        task: TaskSettable,
+        /// New task status; default is no change
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<TaskStatus>,
+
+        /// New task priority; default is no change
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<TaskPriority>,
+
+        /// Tickets to add to the task (or specify nil to remove a ticket)
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        tickets: HashMap<String, Option<String>>,
+
+        /// Information to add to the task (or specify nil to remove a keyword)
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        description: HashMap<String, Option<String>>,
     }
 
-    /// Result of editing a task.
+    /// Result of updating a task.
     #[derive(Debug)]
-    'result: pub struct TaskEditResult {
-        /// ID of the task that has been edited
+    'result: pub struct TaskUpdateResult {
+        /// ID of the task that has been updated
         id: String,
     }
 
-    /// Edit an existing task on the task list.
+    /// Update/edit an existing task on the task list.
     #[derive(Debug)]
-    'state: pub struct TaskEdit {
+    'state: pub struct TaskUpdate {
         file: Arc<Mutex<TaskFile>>,
     }
 }
 
-impl fmt::Display for TaskEditParams {
+impl fmt::Display for TaskUpdateParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "id={} {}", self.id, self.task)
+        write!(f, "id={}", self.id)?;
+
+        if let Some(status) = self.status {
+            write!(f, " status={status:?}")?;
+        }
+        if let Some(priority) = self.priority {
+            write!(f, " prio={priority:?}")?;
+        }
+        for (map, title) in [(&self.tickets, "tickets"), (&self.description, "desc")] {
+            let len = map.len();
+            if len > 0 {
+                write!(f, " {title}=[")?;
+                for (i, (key, value)) in map.iter().enumerate() {
+                    let separator = if i == len - 1 { "" } else { ", " };
+                    if let Some(value) = value {
+                        if value.len() <= 50 {
+                            write!(f, "{key}={value:?}{separator}")?;
+                        } else {
+                            write!(f, "{key}=\"{value:.49}…\"{separator}")?;
+                        }
+                    } else {
+                        write!(f, "{key}=nil")?;
+                    }
+                }
+                write!(f, "]")?;
+            }
+        }
+
+        Ok(())
     }
 }
 
-impl fmt::Display for TaskEditResult {
+impl fmt::Display for TaskUpdateResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "id={}", self.id)
     }
 }
 
-impl TaskEdit {
-    /// Create a task_edit tool for the given file.
+impl TaskUpdate {
+    /// Create a task_update tool for the given file.
     pub fn new(file: Arc<Mutex<TaskFile>>) -> Self {
-        TaskEdit { file }
+        TaskUpdate { file }
     }
 }
 
-impl CallableTool for TaskEdit {
-    async fn execute(&self, params: TaskEditParams) -> Result<TaskEditResult> {
+impl CallableTool for TaskUpdate {
+    async fn execute(&self, params: TaskUpdateParams) -> Result<TaskUpdateResult> {
         let mut file = self.file.lock().await;
 
         let task = file
@@ -383,12 +446,30 @@ impl CallableTool for TaskEdit {
             .get_mut(&params.id)
             .ok_or_else(|| anyhow!("Task with ID {} does not exist in the task list", params.id))?;
 
-        task.settable = params.task;
+        if let Some(status) = params.status {
+            task.settable.status = status;
+        }
+        if let Some(priority) = params.priority {
+            task.settable.priority = priority;
+        }
+        for (state, amendment) in [
+            (&mut task.settable.tickets, params.tickets),
+            (&mut task.settable.description, params.description),
+        ] {
+            for (key, value) in amendment {
+                if let Some(value) = value {
+                    state.insert(key, value);
+                } else {
+                    state.remove(&key);
+                }
+            }
+        }
+
         task.updated_at = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
 
         file.write()?;
 
-        Ok(TaskEditResult { id: params.id })
+        Ok(TaskUpdateResult { id: params.id })
     }
 }
 
