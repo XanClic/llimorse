@@ -102,8 +102,22 @@ async fn main() -> Result<()> {
         SessionLog::null()
     };
 
+    let resume_history = args
+        .resume
+        .map(|resume_from| {
+            SessionLog::load(&resume_from)
+                .map_err(|err| anyhow!("{}: {err}", resume_from.display()))
+        })
+        .transpose()?;
+
     let llm = llimo::Client::new(&args.llama_url);
     let mut agent = llimo::Agent::new_with_listener(llm, session_log_file);
+
+    if let Some(history) = &resume_history {
+        agent.push_history(history.clone());
+    } else if let Some(system_prompt) = system_prompt {
+        agent.push_system(system_prompt);
+    }
 
     agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
 
@@ -111,7 +125,9 @@ async fn main() -> Result<()> {
         let task_file = tools::tasks::TaskFile::open(task_file.clone())
             .with_context(|| format!("{}", task_file.display()))?;
 
-        task_file.inject_active_tasks(&mut agent);
+        if resume_history.is_none() {
+            task_file.inject_active_tasks(&mut agent);
+        }
         task_file.add_tools(&mut agent);
     }
 
@@ -129,20 +145,6 @@ async fn main() -> Result<()> {
             .with_context(|| format!("{}", knowledge_file.display()))?;
 
         knowledge_file.add_tools(&mut agent);
-    }
-
-    let resume_history = args
-        .resume
-        .map(|resume_from| {
-            SessionLog::load(&resume_from)
-                .map_err(|err| anyhow!("{}: {err}", resume_from.display()))
-        })
-        .transpose()?;
-
-    if let Some(history) = &resume_history {
-        agent.push_history(history.clone());
-    } else if let Some(system_prompt) = system_prompt {
-        agent.push_system(system_prompt);
     }
 
     // Push the current time and date so the LLM knows what the timestamps mean
