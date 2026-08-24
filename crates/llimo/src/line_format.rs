@@ -45,9 +45,7 @@ pub struct AssistantMessage {
     pub content: Option<String>,
 
     /// Private reasoning (“thinking”), as separated out by llama-server.
-    ///
-    /// Skipped on serialize, so reasoning is not replayed into later context.
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
 
     /// Tool calls to be performed
