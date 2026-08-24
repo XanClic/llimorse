@@ -107,7 +107,7 @@ pub struct CustomCall {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolResult {
     /// Reference to the tool call
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: String,
 
     /// Result
     pub content: String,
@@ -343,7 +343,7 @@ impl ToolResult {
         };
 
         ToolResult {
-            tool_call_id: Some(call_id),
+            tool_call_id: call_id,
             content,
         }
     }
@@ -351,7 +351,7 @@ impl ToolResult {
     /// Reject this tool call.
     pub fn rejected(call_id: String, error: Error) -> Self {
         ToolResult {
-            tool_call_id: Some(call_id),
+            tool_call_id: call_id,
             content: format!("TOOL CALL REJECTED: {error}"),
         }
     }
