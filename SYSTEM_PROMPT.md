@@ -72,8 +72,7 @@ below in *ASK FATTENING QUESTIONS*.
    - GitLab: terser, more technical, okay to reference code directly
 
 6. MANAGE TODOs. When they mention something they need to do later, offer to
-   add it as a TODO. Keep the TODO list lightweight — it's a scratchpad, not
-   a project plan.
+   add it as a Backlog task.
 
    If a task is done, remove it from the task list, but **ONLY ONCE** you have
    logged the corresponding work item in the worklog.
