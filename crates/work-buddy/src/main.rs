@@ -5,10 +5,11 @@
 
 mod tools;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
+use llimo_chat::log::SessionLog;
 use std::fs;
 use std::path::PathBuf;
 use term_ui::TermUi;
@@ -47,6 +48,14 @@ struct Args {
     /// JSON knowledge file to explain keywords (e.g. projects) and such
     #[arg(long)]
     knowledge: Option<PathBuf>,
+
+    /// Where to store the raw session log for later resuming
+    #[arg(long)]
+    session_logs: Option<PathBuf>,
+
+    /// Raw session log to resume from
+    #[arg(long)]
+    resume: Option<PathBuf>,
 }
 
 /// Return a random “witty” tag line for --help
@@ -85,12 +94,16 @@ async fn main() -> Result<()> {
 
     let system_prompt = args.system.map(fs::read_to_string).transpose()?;
 
-    let llm = llimo::Client::new(&args.llama_url);
-    let mut agent = llimo::Agent::new(llm);
+    let session_log_file = if let Some(session_log_dir) = args.session_logs {
+        let now = Local::now().format("%Y-%m-%dT%H_%M_%S.json").to_string();
+        let path = session_log_dir.join(now);
+        SessionLog::new(&path).map_err(|err| anyhow!("{}: {err}", path.display()))?
+    } else {
+        SessionLog::null()
+    };
 
-    if let Some(system_prompt) = system_prompt {
-        agent.push_system(system_prompt);
-    }
+    let llm = llimo::Client::new(&args.llama_url);
+    let mut agent = llimo::Agent::new_with_listener(llm, session_log_file);
 
     agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
 
@@ -118,6 +131,20 @@ async fn main() -> Result<()> {
         knowledge_file.add_tools(&mut agent);
     }
 
+    let resume_history = args
+        .resume
+        .map(|resume_from| {
+            SessionLog::load(&resume_from)
+                .map_err(|err| anyhow!("{}: {err}", resume_from.display()))
+        })
+        .transpose()?;
+
+    if let Some(history) = &resume_history {
+        agent.push_history(history.clone());
+    } else if let Some(system_prompt) = system_prompt {
+        agent.push_system(system_prompt);
+    }
+
     // Push the current time and date so the LLM knows what the timestamps mean
     let now = Local::now();
     agent.push_system(format!(
@@ -126,7 +153,13 @@ async fn main() -> Result<()> {
         now.to_rfc3339_opts(SecondsFormat::Secs, false)
     ));
 
-    llimo_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
-        .run()
-        .await
+    let mut app = if let Some(resume_history) = resume_history {
+        llimo_chat::App::new_with_history(agent, &resume_history, |history| {
+            Ok(TermUi::new(history))
+        })?
+    } else {
+        llimo_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
+    };
+
+    app.run().await
 }
