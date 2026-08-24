@@ -3,7 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::Local;
 use chrono::format::SecondsFormat;
-use llimo::CallableTool;
+use llimo::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ impl TaskFile {
     }
 
     /// Inject the list of active tasks as system messages
-    pub fn inject_active_tasks(&self, agent: &mut llimo::Agent) {
+    pub fn inject_active_tasks(&self, agent: &mut Agent<impl ChatListener>) {
         let active_tasks = self
             .content
             .iter()
@@ -97,7 +97,7 @@ impl TaskFile {
     }
 
     /// Add relevant tools for this file to `agent`.
-    pub fn add_tools(self, agent: &mut llimo::Agent) {
+    pub fn add_tools(self, agent: &mut Agent<impl ChatListener>) {
         let this = Arc::new(Mutex::new(self));
 
         agent.add_tool(TaskAdd::new(Arc::clone(&this)));

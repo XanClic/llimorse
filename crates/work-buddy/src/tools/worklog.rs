@@ -3,7 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate};
-use llimo::CallableTool;
+use llimo::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -117,7 +117,7 @@ impl WorklogDirectory {
     }
 
     /// Add relevant tools for the worklog to `agent`.
-    pub fn add_tools(self, agent: &mut llimo::Agent) {
+    pub fn add_tools(self, agent: &mut Agent<impl ChatListener>) {
         let this = Arc::new(Mutex::new(self));
 
         agent.add_tool(WorklogAdd::new(Arc::clone(&this)));
