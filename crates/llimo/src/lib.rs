@@ -9,7 +9,7 @@ pub mod line_format;
 pub mod streaming_result;
 pub mod tools;
 
-pub use agent::{Agent, CallableTool};
+pub use agent::{Agent, CallableTool, ChatListener};
 pub use client::Client;
 pub use streaming_result::StreamingChunk;
 
