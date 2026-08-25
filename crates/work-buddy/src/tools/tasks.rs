@@ -47,11 +47,13 @@ impl TaskFile {
     }
 
     /// Inject the list of active tasks as system messages
+    ///
+    /// This also includes critical backlog items.
     pub fn inject_active_tasks(&self, agent: &mut Agent<impl ChatListener>) {
-        let active_tasks = self
-            .content
-            .iter()
-            .filter(|(_, task)| task.settable.status != TaskStatus::Backlog);
+        let active_tasks = self.content.iter().filter(|(_, task)| {
+            task.settable.status != TaskStatus::Backlog
+                || task.settable.priority == TaskPriority::Critical
+        });
 
         let mut message = None::<String>;
         for (id, task) in active_tasks {
