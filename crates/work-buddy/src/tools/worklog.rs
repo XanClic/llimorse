@@ -108,6 +108,9 @@ enum WorklogTag {
 
     /// Some general chore like refactoring
     Chore,
+
+    /// A meeting with one or more other people
+    Meeting,
 }
 
 impl WorklogDirectory {
