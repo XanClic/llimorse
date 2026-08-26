@@ -383,6 +383,10 @@ llimo::tool! {
     'result: pub struct TaskUpdateResult {
         /// ID of the task that has been updated
         id: String,
+
+        /// New complete task state
+        #[serde(flatten)]
+        task: Task,
     }
 
     /// Update/edit an existing task on the task list.
@@ -468,10 +472,14 @@ impl CallableTool for TaskUpdate {
         }
 
         task.updated_at = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+        let task = task.clone();
 
         file.write()?;
 
-        Ok(TaskUpdateResult { id: params.id })
+        Ok(TaskUpdateResult {
+            id: params.id,
+            task,
+        })
     }
 }
 
