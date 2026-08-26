@@ -419,7 +419,7 @@ impl fmt::Display for TaskUpdateParams {
                             write!(f, "{key}=\"{value:.49}…\"{separator}")?;
                         }
                     } else {
-                        write!(f, "{key}=nil")?;
+                        write!(f, "{key}=nil{separator}")?;
                     }
                 }
                 write!(f, "]")?;
