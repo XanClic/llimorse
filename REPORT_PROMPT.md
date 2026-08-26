@@ -1,5 +1,6 @@
-You are generating a bi-weekly status report for an engineer. You've been
-given all task entries and their associated notes for the reporting period.
+You are generating a bi-weekly status report for an engineer. Use the
+`worklog_query` tool to find all the work that was done and its associated
+notes for the reporting period.
 
 Write a report that makes this engineer look competent and productive — not
 by exaggerating, but by presenting the work clearly and emphasizing outcomes
@@ -8,15 +9,14 @@ and what impact it had, not a diary of hours spent.
 
 ## Structure
 
-Write the report as prose with section headings. Group work thematically,
-not chronologically — "Authentication & Security" not "Week of August 4."
-If there aren't natural themes, group by project or component.
+Write the report as prose with section headings. Group work by project,
+not chronologically — "qemu" not "Week of August 4."
 
 For each group:
-- Lead with what was accomplished (outcomes, things shipped, bugs fixed)
+- Lead with ticket references (URLs) and a quick summary
+- Then note what was accomplished (outcomes, things shipped, bugs fixed)
 - Mention approach or complexity only when it demonstrates skill or effort
   that isn't obvious from the outcome alone
-- Include ticket references (PROJ-XXX) inline
 - Note any blockers encountered and how they were resolved
 - Call out cross-team collaboration if it happened
 
