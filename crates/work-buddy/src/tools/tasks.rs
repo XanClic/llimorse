@@ -432,7 +432,7 @@ impl fmt::Display for TaskUpdateParams {
 
 impl fmt::Display for TaskUpdateResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "id={}", self.id)
+        write!(f, "{}={}", self.id, self.task)
     }
 }
 
