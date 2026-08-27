@@ -152,8 +152,28 @@ impl TermUi {
     /// Render the current state onto the screen.
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let layout =
-            Layout::vertical([Constraint::Percentage(100), Constraint::Min(5)]).split(area);
+
+        // Input height field: Number of lines, maximum 5. Note that `.lines()` is always
+        // guaranteed to at least return one (empty) line.
+        // TextArea does not give us a way to get the display height, so we need to use textwrap to
+        // find out ourselves, more or less.
+        const MAX_HEIGHT: usize = 5;
+        let input_inner_width = area.width.saturating_sub(2) as usize; // account for the border
+        let input_outer_height = self
+            .input_area
+            .lines()
+            .iter()
+            .take(MAX_HEIGHT)
+            .map(|line| textwrap::wrap(line, input_inner_width).len().max(1))
+            .sum::<usize>()
+            .min(MAX_HEIGHT) as u16
+            + 2; // account for the border
+
+        let layout = Layout::vertical([
+            Constraint::Percentage(100),
+            Constraint::Min(input_outer_height),
+        ])
+        .split(area);
 
         let history_cell = layout[0];
         let input_cell = layout[1];
