@@ -3,59 +3,77 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
+mod macros;
 mod tools;
 
+use crate::macros::{Mergeable, derive_merge};
 use anyhow::{Context, Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use llimo_chat::log::SessionLog;
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use term_ui::TermUi;
 
-/// Command-line arguments for WorkBuddy
-#[derive(Parser)]
-struct Args {
-    /// llama.cpp server base URL
-    #[arg(long, default_value = "http://127.0.0.1:8080")]
-    llama_url: String,
+/// Default llama-server URL
+const LLAMA_URL_DEFAULT: &str = "http://127.0.0.1:8080";
 
-    /// Base URL of a SearXNG instance for the web_search tool
-    #[arg(long, default_value = "http://127.0.0.1:8888")]
-    searxng_url: String,
+/// Default SearXNG URL
+const SEARXNG_URL_DEFAULT: &str = "http://127.0.0.1:8888";
 
-    /// Path to a file containing the system prompt
-    #[arg(long)]
-    system: Option<PathBuf>,
+derive_merge! {
+    /// Command-line arguments for WorkBuddy
+    #[derive(Parser, Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+    struct Args {
+        /// Config file path (containing base values for all of these arguments)
+        #[arg(long)]
+        #[serde(skip)]
+        config: Option<PathBuf>,
 
-    /// Enable debug-level logging
-    #[arg(long)]
-    debug: bool,
+        /// llama.cpp server base URL [default: http://127.0.0.1:8080]
+        #[arg(long)]
+        llama_url: Option<String>,
 
-    /// Task file path
-    #[arg(long)]
-    tasks: Option<PathBuf>,
+        /// Base URL of a SearXNG instance for the web_search tool [default: http://127.0.0.1:8888]
+        #[arg(long)]
+        searxng_url: Option<String>,
 
-    /// Directory to store work logs in
-    #[arg(long)]
-    worklogs: Option<PathBuf>,
+        /// Path to a file containing the system prompt
+        #[arg(long)]
+        system: Option<PathBuf>,
 
-    /// Allow the LLM to create markdown files in this directory
-    #[arg(long)]
-    markdown_output: Option<PathBuf>,
+        /// Enable debug-level logging
+        #[arg(long)]
+        #[serde(default)]
+        debug: bool,
 
-    /// JSON knowledge file to explain keywords (e.g. projects) and such
-    #[arg(long)]
-    knowledge: Option<PathBuf>,
+        /// Task file path
+        #[arg(long)]
+        tasks: Option<PathBuf>,
 
-    /// Where to store the raw session log for later resuming
-    #[arg(long)]
-    session_logs: Option<PathBuf>,
+        /// Directory to store work logs in
+        #[arg(long)]
+        worklogs: Option<PathBuf>,
 
-    /// Raw session log to resume from
-    #[arg(long)]
-    resume: Option<PathBuf>,
+        /// Allow the LLM to create markdown files in this directory
+        #[arg(long)]
+        markdown_output: Option<PathBuf>,
+
+        /// JSON knowledge file to explain keywords (e.g. projects) and such
+        #[arg(long)]
+        knowledge: Option<PathBuf>,
+
+        /// Where to store the raw session log for later resuming
+        #[arg(long)]
+        session_logs: Option<PathBuf>,
+
+        /// Raw session log to resume from
+        #[arg(long)]
+        resume: Option<PathBuf>,
+    }
 }
 
 /// Return a random “witty” tag line for --help
@@ -72,12 +90,21 @@ fn tagline() -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::from_arg_matches(
+    let mut args = Args::from_arg_matches(
         &Args::command()
             .about(format!("WorkBuddy! …{}", tagline()))
             .get_matches(),
     )
     .unwrap();
+
+    if let Some(file) = &args.config {
+        let config =
+            fs::read_to_string(file).map_err(|err| anyhow!("{}: {err}", file.display()))?;
+        let cfg_args =
+            toml::from_str(&config).map_err(|err| anyhow!("{}: {err}", file.display()))?;
+
+        args.merge_weak(cfg_args);
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -110,7 +137,7 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
 
-    let llm = llimo::Client::new(&args.llama_url);
+    let llm = llimo::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT));
     let mut agent = llimo::Agent::new_with_listener(llm, session_log_file);
 
     if let Some(history) = &resume_history {
@@ -119,7 +146,9 @@ async fn main() -> Result<()> {
         agent.push_system(system_prompt);
     }
 
-    agent.add_tool(llimo::tools::WebSearch::new(&args.searxng_url));
+    agent.add_tool(llimo::tools::WebSearch::new(
+        args.searxng_url.as_deref().unwrap_or(SEARXNG_URL_DEFAULT),
+    ));
 
     if let Some(task_file) = args.tasks {
         let task_file = tools::tasks::TaskFile::open(task_file.clone())
