@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let system_prompt = args.system.map(fs::read_to_string).transpose()?;
 
     let session_log_file = if let Some(session_log_dir) = args.session_logs {
-        let now = Local::now().format("%Y-%m-%dT%H_%M_%S.json").to_string();
+        let now = Local::now().format("%Y-%m-%dT%H_%M_%S.jsonl").to_string();
         let path = session_log_dir.join(now);
         SessionLog::new(&path).map_err(|err| anyhow!("{}: {err}", path.display()))?
     } else {
