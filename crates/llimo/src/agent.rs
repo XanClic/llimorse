@@ -146,6 +146,31 @@ impl Agent {
     pub fn new(client: Client) -> Self {
         Self::new_with_listener(client, ())
     }
+
+    /// Return the entire chat history so far
+    pub fn history(&self) -> &[ChatMessage] {
+        self.history.history()
+    }
+
+    /// Return the last content returned by the LLM after the last input from our side.
+    ///
+    /// Input from our side are:
+    /// - User messages
+    /// - System messages
+    /// - Tool call results
+    pub fn last_result(&self) -> Option<&String> {
+        self.history
+            .history()
+            .iter()
+            .rev()
+            .take_while(|msg| matches!(msg, ChatMessage::Assistant(_)))
+            .find_map(|msg| {
+                let ChatMessage::Assistant(msg) = msg else {
+                    unreachable!() // checked in `take_while`
+                };
+                msg.content.as_ref()
+            })
+    }
 }
 
 impl<L: ChatListener> Agent<L> {
