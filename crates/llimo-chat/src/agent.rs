@@ -81,7 +81,7 @@ impl ChatAgent {
                     .unwrap()
                     .set_token_usage(agent.token_usage());
 
-                let tool_results = agent
+                let mut pending = agent
                     .execute_pending_calls(
                         |agent, call| {
                             self.push_history(
@@ -118,7 +118,6 @@ impl ChatAgent {
                     )
                     .await;
 
-                let mut pending = !tool_results.is_empty();
                 while let Ok(message) = self.user_message_submit.try_recv() {
                     self.push_history(&message, HistoryEntryType::User);
                     agent.push_user(message);

@@ -234,7 +234,7 @@ impl<L: ChatListener> Agent<L> {
         &mut self,
         mut tool_guard: F1,
         mut tool_result_guard: F2,
-    ) -> &[ChatMessage] {
+    ) -> bool {
         let mut results = Vec::<ChatMessage>::with_capacity(self.pending_calls.len());
         let mut futs = FuturesUnordered::new();
         for call in mem::take(&mut self.pending_calls) {
@@ -255,11 +255,10 @@ impl<L: ChatListener> Agent<L> {
         drop(futs);
 
         if results.is_empty() {
-            &[]
+            false
         } else {
-            let base_i = self.history.len();
             self.history.push_vec(results);
-            &self.history.history()[base_i..]
+            true
         }
     }
 
@@ -331,7 +330,7 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
         self,
         tool_guard: F1,
         tool_result_guard: F2,
-    ) -> &'a [ChatMessage] {
+    ) -> bool {
         assert!(self.terminated);
         self.agent
             .execute_pending_calls(tool_guard, tool_result_guard)
@@ -428,7 +427,7 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
         self,
         tool_guard: F1,
         tool_result_guard: F2,
-    ) -> &'a [ChatMessage] {
+    ) -> bool {
         assert!(self.stream.is_terminated());
         self.stream
             .agent
@@ -531,11 +530,6 @@ impl<L: ChatListener> ChatHistory<L> {
     /// Return all chat messages in the history.
     fn history(&self) -> &[ChatMessage] {
         &self.history
-    }
-
-    /// Return the number of messages in the history.
-    fn len(&self) -> usize {
-        self.history.len()
     }
 
     /// Append the given `message` to the history.
