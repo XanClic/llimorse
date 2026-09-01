@@ -366,3 +366,13 @@ impl<'a> From<ToolChoiceSet<'a>> for ToolChoice<'a> {
         ToolChoice::ToolChoice(set)
     }
 }
+
+impl ToolCallParams {
+    /// Return the name of the function or custom tool called.
+    pub fn name(&self) -> &str {
+        match self {
+            ToolCallParams::Function { function } => &function.name,
+            ToolCallParams::Custom { custom } => &custom.name,
+        }
+    }
+}

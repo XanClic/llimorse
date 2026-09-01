@@ -91,25 +91,18 @@ impl ChatAgent {
                             Ok(())
                         },
                         |agent, call, result| {
-                            let name = match &call.call {
-                                llimo::line_format::ToolCallParams::Function { function } => {
-                                    &function.name
-                                }
-                                llimo::line_format::ToolCallParams::Custom { custom } => {
-                                    &custom.name
-                                }
-                            };
+                            let name = call.call.name();
+                            let id = &call.id;
                             match result {
                                 Ok(result) => self.push_history(
                                     &format!(
-                                        "=[{name}/{}]=> {}\n",
-                                        call.id,
+                                        "=[{name}/{id}]=> {}\n",
                                         agent.display_call_result(&call.call, result)
                                     ),
                                     HistoryEntryType::ToolResultOk,
                                 ),
                                 Err(err) => self.push_history(
-                                    &format!("=[{name}/{}]=> {err}\n", call.id),
+                                    &format!("=[{name}/{id}]=> {err}\n"),
                                     HistoryEntryType::ToolResultErr,
                                 ),
                             }
