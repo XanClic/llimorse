@@ -323,7 +323,7 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     ///
     /// # Panics
     ///
-    /// Panics if [`AgentRunning::terminated`] is false.
+    /// Panics if [`AgentRunning::is_terminated()`] is false.
     pub async fn execute_pending_calls<
         F1: FnMut(&Agent<L>, &ToolCall) -> Result<()>,
         F2: FnMut(&Agent<L>, &ToolCall, &Result<String>) -> Result<()>,

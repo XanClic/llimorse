@@ -166,8 +166,8 @@ struct StreamChoice {
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
     /// Return the full message after streaming is done.
     ///
-    /// Will only return `Some(_)` once streaming is done ([`<Self as
-    /// FusedStream>::is_terminated()`] returns true) and only if there was no error.
+    /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
+    /// and only if there was no error.
     ///
     /// `.take()`s the full message, so will return it only once.
     pub(crate) fn full_message_pinned(self: Pin<&mut Self>) -> Option<AssistantMessage> {
@@ -176,8 +176,8 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
 
     /// Return the token usage after streaming is done, if sent by the server.
     ///
-    /// Will only return `Some(_)` once streaming is done ([`<Self as
-    /// FusedStream>::is_terminated()`] returns true) and only if there was no error.
+    /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
+    /// and only if there was no error.
     ///
     /// `.take()`s the token count, so will return it only once.
     pub(crate) fn token_usage_pinned(self: Pin<&mut Self>) -> Option<TokenUsage> {
@@ -186,7 +186,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
 }
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<'_, S> {
-    /// Implementation for [`<StreamingResult as Stream>::poll_next()`].
+    /// Implementation for [`StreamingResult::poll_next()`].
     ///
     /// Implemented separately so the actual function can check for completion and call
     /// [Self::terminate()`] when necessary.
@@ -457,7 +457,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedStream for NewlineSpl
     }
 }
 
-/// An object that is the streaming version of something in [`crate::llm::line_format`].
+/// An object that is the streaming version of something in [`crate::line_format`].
 trait StreamingObject {
     /// The corresponding non-streaming type.
     type NonStreaming;
