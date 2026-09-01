@@ -111,6 +111,9 @@ enum WorklogTag {
 
     /// A meeting with one or more other people
     Meeting,
+
+    /// Testing work
+    Tests,
 }
 
 impl WorklogDirectory {
