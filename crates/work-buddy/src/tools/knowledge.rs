@@ -227,18 +227,25 @@ llimo::tool! {
     /// Query content from the knowledge database, by keyword.
     #[derive(Debug)]
     'params: pub struct KnowledgeQueryParams {
-        /// The keyword whose content to look up
-        keyword: String,
+        /// The keyword whose content to look up. If not specified, return all keywords in the DB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyword: Option<String>,
     }
 
     /// Result of querying the knowledge database
     #[derive(Debug)]
     'result: pub struct KnowledgeQueryResult {
         /// The keyword that was looked up
-        keyword: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyword: Option<String>,
 
         /// Content that describes the keyword
-        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+
+        /// All keywords in the database
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<String>,
     }
 
     /// Query content from the knowledge database, by keyword.
@@ -251,18 +258,31 @@ llimo::tool! {
 
 impl fmt::Display for KnowledgeQueryParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "key={}", self.keyword)
+        if let Some(key) = &self.keyword {
+            write!(f, "key={key}")?;
+        }
+        Ok(())
     }
 }
 
 impl fmt::Display for KnowledgeQueryResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "key={} ", self.keyword)?;
-        if self.content.len() <= 50 {
-            write!(f, "content={:?}", self.content)
-        } else {
-            write!(f, "content=\"{:.49}…\"", self.content)
+        if !self.keywords.is_empty() {
+            write!(f, "keywords={:?}", self.keywords)?;
+            assert!(self.keyword.is_none());
+            assert!(self.content.is_none());
         }
+        if let Some(key) = &self.keyword {
+            write!(f, "key={key}")?;
+        }
+        if let Some(content) = &self.content {
+            if content.len() <= 50 {
+                write!(f, " content={content:?}")?;
+            } else {
+                write!(f, " content=\"{content:.49}…\"")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -277,11 +297,19 @@ impl CallableTool for KnowledgeQuery {
     async fn execute(&self, params: KnowledgeQueryParams) -> Result<KnowledgeQueryResult> {
         let db = self.db.lock().await;
 
+        let Some(key) = params.keyword else {
+            return Ok(KnowledgeQueryResult {
+                keyword: None,
+                content: None,
+                keywords: db.content.keys().cloned().collect(),
+            });
+        };
+
         let mut entry = db
             .content
-            .get(&params.keyword)
-            .ok_or_else(|| anyhow!("Keyword {} not present in the database", params.keyword))?;
-        let mut looked_up = &params.keyword;
+            .get(&key)
+            .ok_or_else(|| anyhow!("Keyword {key} not present in the database"))?;
+        let mut looked_up = &key;
         while let KnowledgeOrAlias::Alias(link) = entry {
             entry = db.content.get(link).ok_or_else(|| {
                 anyhow!("Dead link: '{looked_up}' points to '{link}', which does not exist")
@@ -296,8 +324,9 @@ impl CallableTool for KnowledgeQuery {
         };
 
         Ok(KnowledgeQueryResult {
-            keyword: params.keyword,
-            content: content.clone(),
+            keyword: Some(key),
+            content: Some(content.clone()),
+            keywords: Vec::new(),
         })
     }
 }
