@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod client;
 pub mod line_format;
+pub mod prefill_instructions;
 pub mod streaming_result;
 pub mod tools;
 

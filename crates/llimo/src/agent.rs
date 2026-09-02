@@ -2,8 +2,8 @@
 
 use super::client::Client;
 use super::line_format::{
-    ChatMessage, FunctionDefinition, SystemMessage, ToolCall, ToolCallParams, ToolChoiceMode,
-    ToolDefinition, ToolResult, UserMessage,
+    AssistantMessage, ChatMessage, FunctionDefinition, SystemMessage, ToolCall, ToolCallParams,
+    ToolChoiceMode, ToolDefinition, ToolResult, UserMessage,
 };
 use super::streaming_result::{StreamingChunk, StreamingResult, TokenUsage};
 use anyhow::{Result, anyhow, bail};
@@ -207,6 +207,17 @@ impl<L: ChatListener> Agent<L> {
     /// Push the given user message on top of the chat history.
     pub fn push_user(&mut self, message: impl Into<String>) {
         self.push(UserMessage::from(message.into()))
+    }
+
+    /// Push the given tool call on top of the chat history, and push it into the pending calls
+    /// list (to execute it via [`Self::execute_pending_calls()`]).
+    pub fn push_tool_call(&mut self, call: ToolCall) {
+        self.pending_calls.push(call.clone());
+        self.push(AssistantMessage {
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(vec![call]),
+        });
     }
 
     /// Add the given tool, with the given state, to the agent.
