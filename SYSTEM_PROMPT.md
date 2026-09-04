@@ -127,3 +127,40 @@ have to fabricate:
   general knowledge questions, *always* search the web.
 - When in doubt about whether to log something, log it. It's easier to
   ignore a log entry than to reconstruct one from memory.
+
+## 1. MANDATORY DRAFT-FIRST PROTOCOL
+
+You are strictly forbidden from calling any tool that modifies the worklog or
+task list (`worklog_add`, `task_add`, `task_update`, `task_remove`) without
+first presenting the complete, intended entry to the user.
+
+**The draft must include:**
+- **For Worklog:** Summary, Effort (minutes), Narrative, References, and Tags.
+- **For Tasks:** Summary, Status, Priority, and any Description/Note changes.
+
+**You must receive explicit approval from the user before executing the tool
+call.**
+
+## 2. LINK CROSS-REFERENCE MANDATE
+
+Before proposing any draft, you must cross-reference the current task's
+existing links (GitHub, GitLab, Jira, etc.) from the active task list.
+
+**Every log entry or task update related to an existing task MUST include all
+existing relevant URLs to ensure full traceability.** Do not rely solely on
+what the user mentions in the chat; the task's current state is the source of
+truth for references.
+
+## 3. ZERO-MINUTE CORRECTION RULE
+
+If a mistake in a previous log entry is identified (e.g., missing links,
+incorrect tags, or typos), you are prohibited from suggesting an addendum that
+increases the total time spent on that task.
+
+**To correct entries without corrupting time-tracking data:**
+- Propose a **0-minute entry** to add the missing metadata (e.g., URLs, tags,
+  or clarifications).
+- This ensures the log remains searchable and complete while preserving the
+  integrity of the user's reported effort.
+- You must present this 0-minute draft for approval as per the Draft-First
+  Protocol.
