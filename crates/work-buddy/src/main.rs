@@ -13,8 +13,9 @@ use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use llimo_chat::log::SessionLog;
 use serde::Deserialize;
-use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::{env, fs};
 use term_ui::TermUi;
 
 /// Default llama-server URL
@@ -49,6 +50,11 @@ derive_merge! {
         #[arg(long)]
         #[serde(default)]
         debug: bool,
+
+        /// File to append log output to, because the terminal is taken by the UI
+        /// [default: $TMPDIR/work-buddy.log]
+        #[arg(long)]
+        log_file: Option<PathBuf>,
 
         /// Task file path
         #[arg(long)]
@@ -106,17 +112,29 @@ async fn main() -> Result<()> {
         args.merge_weak(cfg_args);
     }
 
+    let log_path = args
+        .log_file
+        .clone()
+        .unwrap_or_else(|| env::temp_dir().join("work-buddy.log"));
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| anyhow!("{}: {err}", log_path.display()))?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 if args.debug {
-                    "work_buddy=debug"
+                    "info,work_buddy=debug"
                 } else {
-                    "work_buddy=info"
+                    "info"
                 }
                 .into()
             }),
         )
+        .with_writer(Arc::new(log_file))
+        .with_ansi(false)
         .init();
 
     let system_prompt = args.system.map(fs::read_to_string).transpose()?;
