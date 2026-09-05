@@ -19,6 +19,14 @@ pub use streaming_result::StreamingChunk;
 /// Specifically, defines a tool with its parameters and a state object.  Users still need to
 /// implement the [`CallableTool`] trait.  To add the tool to an agent, call [`Agent::add_tool()`]
 /// with the `'state` type.
+///
+/// The `'params` struct must have named fields (i.e. a braced body) so its JSON schema describes
+/// a JSON object, which is what tool calls expect.  The `'result` and `'state` structs may have
+/// any shape: named fields, a tuple body, or no body at all.
+///
+/// For empty parameters or results, prefer `{}` over a unit struct: a unit struct serializes as
+/// `null` (and its schema is `"type": "null"`), which an LLM may read as an error indicator,
+/// while `{}` reads as “fine, but empty”.
 #[macro_export]
 macro_rules! tool {
     (
@@ -34,20 +42,10 @@ macro_rules! tool {
         }
 
         $(#[$result_attr:meta])*
-        'result: $result_vis:vis struct $result_name:ident {
-            $(
-                $(#[$result_id_attr:meta])*
-                $result_identifier:ident: $result_type:ty,
-            )*
-        }
+        'result: $result_vis:vis struct $result_name:ident $result_body:tt $(;)?
 
         $(#[$state_attr:meta])*
-        'state: $state_vis:vis struct $type_name:ident {
-            $(
-                $(#[$state_id_attr:meta])*
-                $state_identifier:ident: $state_type:ty,
-            )*
-        }
+        'state: $state_vis:vis struct $type_name:ident $state_body:tt $(;)?
     ) => {
         #[doc = $desc]
         $(#[$attr])*
@@ -59,21 +57,15 @@ macro_rules! tool {
             )*
         }
 
-        $(#[$result_attr])*
-        #[derive(serde::Deserialize, serde::Serialize)]
-        $result_vis struct $result_name {
-            $(
-                $(#[$result_id_attr])*
-                $result_identifier: $result_type,
-            )*
+        $crate::__tool_struct! {
+            $(#[$result_attr])*
+            #[derive(serde::Deserialize, serde::Serialize)]
+            $result_vis struct $result_name $result_body
         }
 
-        $(#[$state_attr])*
-        $state_vis struct $type_name {
-            $(
-                $(#[$state_id_attr])*
-                $state_identifier: $state_type,
-            )*
+        $crate::__tool_struct! {
+            $(#[$state_attr])*
+            $state_vis struct $type_name $state_body
         }
 
         impl $crate::agent::Tool for $type_name {
@@ -132,4 +124,37 @@ macro_rules! tool {
             type ResultType = $result_name;
         }
     }
+}
+
+/// Define a struct of any shape, given its body as a single token tree.
+///
+/// Implementation detail of [`tool!`]: that macro takes the `'result` and `'state` struct bodies
+/// opaquely, so it needs a helper to re-emit them in the right form (a tuple struct needs a
+/// trailing semicolon, a braced one must not have one).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tool_struct {
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $(#[$attr])*
+        $vis struct $name { $($body)* }
+    };
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident($($body:tt)*)
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($($body)*);
+    };
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name;
+    };
 }
