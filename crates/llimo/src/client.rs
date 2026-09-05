@@ -23,7 +23,12 @@ impl Client {
     pub fn new(base_url: &str) -> Self {
         Client {
             http: reqwest::Client::builder()
-                .timeout(time::Duration::from_secs(600))
+                // Per-read, not total: a total timeout counts the whole SSE stream against the
+                // deadline, so it kills long generations (at ~19 t/s, 600 s cut off at ~11k
+                // tokens) instead of detecting a stalled server.  This resets on every chunk, so
+                // it only fires when nothing arrives at all.  Generous, because it also covers
+                // prompt processing before the first token.
+                .read_timeout(time::Duration::from_secs(300))
                 .build()
                 .expect("building http client"),
             url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')),
