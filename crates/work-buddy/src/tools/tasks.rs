@@ -247,6 +247,7 @@ llimo::tool! {
     /// Add a task to the task list.
     #[derive(Debug)]
     'state: pub struct TaskAdd {
+        /// The central task file
         file: Arc<Mutex<TaskFile>>,
     }
 }
@@ -315,6 +316,7 @@ llimo::tool! {
     /// Remove a task from the task list.
     #[derive(Debug)]
     'state: pub struct TaskRemove {
+        /// The central task file
         file: Arc<Mutex<TaskFile>>,
     }
 }
@@ -392,6 +394,7 @@ llimo::tool! {
     /// Update/edit an existing task on the task list.
     #[derive(Debug)]
     'state: pub struct TaskUpdate {
+        /// The central task file
         file: Arc<Mutex<TaskFile>>,
     }
 }
@@ -513,6 +516,7 @@ llimo::tool! {
     /// Query tasks from the list of *all* tasks.
     #[derive(Debug)]
     'state: pub struct TaskQuery {
+        /// The central task file
         file: Arc<Mutex<TaskFile>>,
     }
 }
