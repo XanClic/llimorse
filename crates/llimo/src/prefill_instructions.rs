@@ -1,7 +1,7 @@
 //! Prefill the chat context by user-defined instructions
 
-use crate::Agent;
 use crate::line_format::ToolCall;
+use crate::{Agent, ChatListener};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 #[allow(async_fn_in_trait)]
 pub trait Prefill: Sized {
     /// Consume this object to prefill the chat context from it.
-    async fn execute(self, agent: &mut Agent) -> Result<()>;
+    async fn execute(self, agent: &mut Agent<impl ChatListener>) -> Result<()>;
 }
 
 /// Instructions on how to prefill the chat context e.g. with system information read from files
@@ -72,7 +72,7 @@ impl PrefillInstructions {
 }
 
 impl Prefill for PrefillInstructions {
-    async fn execute(self, agent: &mut Agent) -> Result<()> {
+    async fn execute(self, agent: &mut Agent<impl ChatListener>) -> Result<()> {
         for insn in self.0 {
             insn.execute(agent).await?;
         }
@@ -81,7 +81,7 @@ impl Prefill for PrefillInstructions {
 }
 
 impl Prefill for Instruction {
-    async fn execute(self, agent: &mut Agent) -> Result<()> {
+    async fn execute(self, agent: &mut Agent<impl ChatListener>) -> Result<()> {
         match self {
             Instruction::Message(msg) => msg.execute(agent).await,
             Instruction::ToolCall(call) => call.execute(agent).await,
@@ -90,7 +90,7 @@ impl Prefill for Instruction {
 }
 
 impl Prefill for Message {
-    async fn execute(self, agent: &mut Agent) -> Result<()> {
+    async fn execute(self, agent: &mut Agent<impl ChatListener>) -> Result<()> {
         let data = match self.source {
             MessageSource::Inline(s) => s,
             MessageSource::File(ref path) => {
@@ -108,7 +108,7 @@ impl Prefill for Message {
 }
 
 impl Prefill for ToolCall {
-    async fn execute(self, agent: &mut Agent) -> Result<()> {
+    async fn execute(self, agent: &mut Agent<impl ChatListener>) -> Result<()> {
         agent.push_tool_call(self);
 
         let mut error = None::<anyhow::Error>;
