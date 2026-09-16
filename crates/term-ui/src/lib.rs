@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
+mod wrap;
+
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
@@ -154,9 +156,10 @@ impl TermUi {
         let area = frame.area();
 
         // Input height field: Number of lines, maximum 5. Note that `.lines()` is always
-        // guaranteed to at least return one (empty) line.
-        // TextArea does not give us a way to get the display height, so we need to use textwrap to
-        // find out ourselves, more or less.
+        // guaranteed to at least return one (empty) line, and `line_ranges` likewise always
+        // yields at least one row per line.
+        // The `TextArea` does not expose its on-screen row count, so count rows with the same
+        // wrapping algorithm the widget renders with (vendored in `wrap`).
         const MAX_HEIGHT: usize = 5;
         let input_inner_width = area.width.saturating_sub(2) as usize; // account for the border
         let input_outer_height = self
@@ -164,7 +167,9 @@ impl TermUi {
             .lines()
             .iter()
             .take(MAX_HEIGHT)
-            .map(|line| textwrap::wrap(line, input_inner_width).len().max(1))
+            .map(|line| {
+                wrap::wrapped_line_count(line, self.input_area.wrap_mode(), input_inner_width)
+            })
             .sum::<usize>()
             .min(MAX_HEIGHT) as u16
             + 2; // account for the border
