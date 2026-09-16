@@ -53,7 +53,7 @@ impl ChatHistory {
             ChatMessage::System(_) => (),
 
             ChatMessage::User(UserMessage { content }) => {
-                self.push(content, HistoryEntryType::User, true);
+                self.push_lines(content, HistoryEntryType::User, true);
             }
 
             ChatMessage::Assistant(AssistantMessage {
@@ -62,21 +62,21 @@ impl ChatHistory {
                 tool_calls,
             }) => {
                 if let Some(reasoning) = reasoning_content {
-                    self.push(reasoning, HistoryEntryType::Reasoning, true);
+                    self.push_lines(reasoning, HistoryEntryType::Reasoning, true);
                 }
                 if let Some(content) = content {
-                    self.push(content, HistoryEntryType::Content, true);
+                    self.push_lines(content, HistoryEntryType::Content, true);
                 }
                 if let Some(tool_calls) = tool_calls {
                     for call in tool_calls {
                         self.open_tool_calls
                             .insert(call.id.clone(), call.call.clone());
 
-                        self.push(
+                        self.push_lines(
                             &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
                             HistoryEntryType::ToolCall,
                             true,
-                        )
+                        );
                     }
                 }
             }
@@ -96,7 +96,7 @@ impl ChatHistory {
                     .strip_prefix("TOOL CALL FAILED: ")
                     .or_else(|| content.strip_prefix("TOOL CALL REJECTED: "))
                 {
-                    Some(error) => self.push(
+                    Some(error) => self.push_lines(
                         &format!("=[{name}/{tool_call_id}]=> {error}\n"),
                         HistoryEntryType::ToolResultErr,
                         true,
@@ -111,7 +111,7 @@ impl ChatHistory {
                             format!("=[{name}/{tool_call_id}]=> {content}\n")
                         };
 
-                        self.push(&line, HistoryEntryType::ToolResultOk, true);
+                        self.push_lines(&line, HistoryEntryType::ToolResultOk, true);
                     }
                 }
             }
@@ -135,8 +135,8 @@ impl ChatHistory {
 
     /// Append the given string of type `ct` to the history.
     ///
-    /// If `force_new_line` is true, append it to the prior line if the type matches; if it is
-    /// false, always create a new line.
+    /// If `force_new_line` is false and the last line is of the same type, append to it; if it is
+    /// true, always create a new line.
     pub fn push(&mut self, string: &str, kind: HistoryEntryType, force_new_line: bool) {
         if let Some(last) = self.lines.last_mut() {
             if last.1 == kind && !force_new_line {
@@ -153,6 +153,20 @@ impl ChatHistory {
         }
 
         self.lines.push((string.to_string(), kind));
+    }
+
+    /// Append the given multi-line string to the history.
+    ///
+    /// Splits `string` at newlines and appends each line as its own entry, so that entries in
+    /// [`Self::lines()`] never span multiple physical lines.
+    ///
+    /// If `force_new_line` is false and the last line is of the same type, append to it; if it is
+    /// true, always create a new line.
+    pub fn push_lines(&mut self, string: &str, kind: HistoryEntryType, mut force_new_line: bool) {
+        for line in string.split('\n') {
+            self.push(line, kind, force_new_line);
+            force_new_line = true; // just saw \n, so next line must be on a new line
+        }
     }
 
     /// Force-resolve all open tool calls.
@@ -172,5 +186,148 @@ impl ChatHistory {
             self.push_raw(agent, &message);
             agent.push(message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llimorse::line_format::{FunctionCall, SystemMessage, ToolCall};
+    use llimorse::{Agent, Client};
+
+    /// Create a throwaway agent (constructing the client does no network access).
+    fn test_agent() -> Agent<()> {
+        Agent::new(Client::new("http://localhost"))
+    }
+
+    /// Assert the core invariant: no history entry spans multiple physical lines.
+    fn assert_single_line_entries(history: &ChatHistory) {
+        assert!(
+            !history.lines().iter().any(|(line, _)| line.contains('\n')),
+            "history entry spans multiple lines: {:#?}",
+            history.lines()
+        );
+    }
+
+    #[test]
+    fn push_raw_splits_multiline_messages() {
+        let agent = test_agent();
+        let mut history = ChatHistory::default();
+
+        history.push_raw(
+            &agent,
+            &ChatMessage::User(UserMessage {
+                content: "line one\nline two".into(),
+            }),
+        );
+        history.push_raw(
+            &agent,
+            &ChatMessage::Assistant(AssistantMessage {
+                reasoning_content: Some("think one\nthink two".into()),
+                content: Some("reply one\nreply two".into()),
+                tool_calls: None,
+            }),
+        );
+
+        assert_eq!(
+            history.lines(),
+            &[
+                ("line one".to_owned(), HistoryEntryType::User),
+                ("line two".to_owned(), HistoryEntryType::User),
+                (String::new(), HistoryEntryType::Empty),
+                ("think one".to_owned(), HistoryEntryType::Reasoning),
+                ("think two".to_owned(), HistoryEntryType::Reasoning),
+                (String::new(), HistoryEntryType::Empty),
+                ("reply one".to_owned(), HistoryEntryType::Content),
+                ("reply two".to_owned(), HistoryEntryType::Content),
+            ]
+        );
+        assert_single_line_entries(&history);
+    }
+
+    #[test]
+    fn push_raw_splits_tool_calls_and_results() {
+        let agent = test_agent();
+        let mut history = ChatHistory::default();
+
+        let call = ToolCall {
+            id: "call_1".into(),
+            call: ToolCallParams::Function {
+                function: FunctionCall {
+                    name: "some_tool".into(),
+                    arguments: "{}".into(),
+                },
+            },
+        };
+        history.push_raw(
+            &agent,
+            &ChatMessage::Assistant(AssistantMessage {
+                reasoning_content: None,
+                content: None,
+                tool_calls: Some(vec![call]),
+            }),
+        );
+        history.push_raw(
+            &agent,
+            &ChatMessage::Tool(ToolResult {
+                tool_call_id: "call_1".into(),
+                content: "result one\nresult two\n".into(),
+            }),
+        );
+
+        // The tool is not registered with the test agent, so the display falls back to the
+        // `[unknown ...]` forms
+        assert_eq!(
+            history.lines(),
+            &[
+                (
+                    "[call_1] [unknown function some_tool]".to_owned(),
+                    HistoryEntryType::ToolCall,
+                ),
+                (String::new(), HistoryEntryType::Empty),
+                (
+                    "=[some_tool/call_1]=> [unknown function some_tool]".to_owned(),
+                    HistoryEntryType::ToolResultOk,
+                ),
+                (String::new(), HistoryEntryType::ToolResultOk),
+            ]
+        );
+        assert_single_line_entries(&history);
+    }
+
+    #[test]
+    fn push_raw_does_not_merge_consecutive_messages() {
+        let agent = test_agent();
+        let mut history = ChatHistory::default();
+
+        history.push_raw(
+            &agent,
+            &ChatMessage::User(UserMessage {
+                content: "first".into(),
+            }),
+        );
+        history.push_raw(
+            &agent,
+            &ChatMessage::System(SystemMessage {
+                content: "in between".into(),
+            }),
+        );
+        history.push_raw(
+            &agent,
+            &ChatMessage::User(UserMessage {
+                content: "second".into(),
+            }),
+        );
+
+        // System messages are skipped, so the two user messages end up adjacent — but they must
+        // stay separate entries, not be merged into one line
+        assert_eq!(
+            history.lines(),
+            &[
+                ("first".to_owned(), HistoryEntryType::User),
+                ("second".to_owned(), HistoryEntryType::User),
+            ]
+        );
+        assert_single_line_entries(&history);
     }
 }

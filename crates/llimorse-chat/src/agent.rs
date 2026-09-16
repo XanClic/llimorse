@@ -139,11 +139,7 @@ impl ChatAgent {
     /// Push the given string into the chat history, processing newlines
     fn push_history(&self, string: &str, kind: HistoryEntryType) {
         let mut history = self.chat_history.lock().unwrap();
-        let mut force_new_line = false;
-        for line in string.split('\n') {
-            history.push(line, kind, force_new_line);
-            force_new_line = true;
-        }
+        history.push_lines(string, kind, false);
         drop(history);
 
         self.update_ui.notify_one();
