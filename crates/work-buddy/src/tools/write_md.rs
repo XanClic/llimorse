@@ -1,12 +1,12 @@
 //! A tool to just write out markdown files
 
 use anyhow::{Result, anyhow};
-use llimo::CallableTool;
+use llimorse::CallableTool;
 use std::io::Write;
 use std::path::PathBuf;
 use std::{fmt, fs};
 
-llimo::tool! {
+llimorse::tool! {
     'name: "write_markdown";
 
     /// Write a full markdown file for example with design specifications developed in a

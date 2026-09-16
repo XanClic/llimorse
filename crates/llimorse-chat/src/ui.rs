@@ -1,6 +1,6 @@
-//! UI connector for llimo-chat UIs
+//! UI connector for llimorse-chat UIs
 
-/// UI state for interacting with the llimo-chat application
+/// UI state for interacting with the llimorse-chat application
 #[allow(async_fn_in_trait)]
 pub trait UiState {
     /// Error type for the implementing `struct`.

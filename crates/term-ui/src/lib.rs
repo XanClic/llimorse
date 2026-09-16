@@ -6,8 +6,8 @@
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
-use llimo_chat::history::HistoryEntryType;
-use llimo_chat::{ChatHistory, ui};
+use llimorse_chat::history::HistoryEntryType;
+use llimorse_chat::{ChatHistory, ui};
 use ratatui::layout::{Alignment, Constraint, Layout, Margin};
 use ratatui::style::Style;
 use ratatui::text::Text;

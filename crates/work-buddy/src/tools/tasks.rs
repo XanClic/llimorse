@@ -3,7 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::Local;
 use chrono::format::SecondsFormat;
-use llimo::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,7 +223,7 @@ impl fmt::Display for TaskSettable {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "task_add";
 
     /// Add a task to the task list.
@@ -296,7 +296,7 @@ impl CallableTool for TaskAdd {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "task_remove";
 
     /// Remove a task from the task list.
@@ -354,7 +354,7 @@ impl CallableTool for TaskRemove {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "task_update";
 
     /// Update/edit an existing task on the task list.
@@ -486,7 +486,7 @@ impl CallableTool for TaskUpdate {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "task_query";
 
     /// Query tasks from the list of *all* tasks.

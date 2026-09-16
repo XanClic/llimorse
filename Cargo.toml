@@ -1,14 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/llimo", "crates/llimo-chat", "crates/term-ui", "crates/work-buddy"]
+members = ["crates/llimorse", "crates/llimorse-chat", "crates/term-ui", "crates/work-buddy"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-llimo = { path = "crates/llimo" }
-llimo-chat = { path = "crates/llimo-chat" }
+llimorse = { path = "crates/llimorse" }
+llimorse-chat = { path = "crates/llimorse-chat" }
 term-ui = { path = "crates/term-ui" }
 anyhow = "1"
 bytes = "1"

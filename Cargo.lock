@@ -1362,7 +1362,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llimo"
+name = "llimorse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1379,12 +1379,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "llimo-chat"
+name = "llimorse-chat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
- "llimo",
+ "llimorse",
  "serde",
  "serde_json",
  "tokio",
@@ -2665,7 +2665,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "futures",
- "llimo-chat",
+ "llimorse-chat",
  "ratatui",
  "ratatui-textarea",
  "textwrap",
@@ -3586,8 +3586,8 @@ dependencies = [
  "chrono",
  "clap",
  "fastrand",
- "llimo",
- "llimo-chat",
+ "llimorse",
+ "llimorse-chat",
  "schemars",
  "serde",
  "serde_json",

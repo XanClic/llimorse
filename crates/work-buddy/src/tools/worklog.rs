@@ -3,7 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate};
-use llimo::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -220,7 +220,7 @@ impl fmt::Display for WorklogSettableEntry {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "worklog_add";
 
     /// Log work the user has done in the worklog.
@@ -274,7 +274,7 @@ impl CallableTool for WorklogAdd {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "worklog_query";
 
     /// Query the worklog for entries.

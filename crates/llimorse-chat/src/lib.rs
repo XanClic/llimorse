@@ -1,4 +1,4 @@
-//! Framework for a llimo-based chat application
+//! Framework for a llimorse-based chat application
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
@@ -12,8 +12,8 @@ use agent::ChatAgent;
 use anyhow::Result;
 use futures::FutureExt;
 pub use history::ChatHistory;
-use llimo::line_format::ChatMessage;
-use llimo::{Agent, ChatListener};
+use llimorse::line_format::ChatMessage;
+use llimorse::{Agent, ChatListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};

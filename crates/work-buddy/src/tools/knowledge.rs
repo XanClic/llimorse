@@ -1,7 +1,7 @@
 //! Tools to manage contextual knowledge
 
 use anyhow::{Result, anyhow};
-use llimo::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool, ChatListener};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -73,7 +73,7 @@ impl KnowledgeFile {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "knowledge_upsert";
 
     /// Add new content to the knowledge database (to explain keywords, e.g. projects, components,
@@ -221,7 +221,7 @@ impl CallableTool for KnowledgeUpsert {
     }
 }
 
-llimo::tool! {
+llimorse::tool! {
     'name: "knowledge_query";
 
     /// Query content from the knowledge database, by keyword.

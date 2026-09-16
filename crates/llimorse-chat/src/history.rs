@@ -1,8 +1,10 @@
 //! Chat log implementation.
 
 use anyhow::anyhow;
-use llimo::line_format::{AssistantMessage, ChatMessage, ToolCallParams, ToolResult, UserMessage};
-use llimo::{Agent, ChatListener};
+use llimorse::line_format::{
+    AssistantMessage, ChatMessage, ToolCallParams, ToolResult, UserMessage,
+};
+use llimorse::{Agent, ChatListener};
 use std::collections::HashMap;
 
 /// Type of a chat history entry (for formatting)

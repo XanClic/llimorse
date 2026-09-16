@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
-use llimo_chat::log::SessionLog;
+use llimorse_chat::log::SessionLog;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -155,8 +155,8 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
 
-    let llm = llimo::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT));
-    let mut agent = llimo::Agent::new_with_listener(llm, session_log_file);
+    let llm = llimorse::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT));
+    let mut agent = llimorse::Agent::new_with_listener(llm, session_log_file);
 
     if let Some(history) = &resume_history {
         agent.push_history(history.clone());
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         agent.push_system(system_prompt);
     }
 
-    agent.add_tool(llimo::tools::WebSearch::new(
+    agent.add_tool(llimorse::tools::WebSearch::new(
         args.searxng_url.as_deref().unwrap_or(SEARXNG_URL_DEFAULT),
     ));
 
@@ -203,11 +203,11 @@ async fn main() -> Result<()> {
     ));
 
     let mut app = if let Some(resume_history) = resume_history {
-        llimo_chat::App::new_with_history(agent, &resume_history, |history| {
+        llimorse_chat::App::new_with_history(agent, &resume_history, |history| {
             Ok(TermUi::new(history))
         })?
     } else {
-        llimo_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
+        llimorse_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
     };
 
     app.run().await

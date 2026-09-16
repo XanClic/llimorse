@@ -1,14 +1,14 @@
-//! [`llimo::ChatListener`] implementation to keep a log.
+//! [`llimorse::ChatListener`] implementation to keep a log.
 
 use anyhow::{Result, anyhow};
-use llimo::ChatListener;
-use llimo::line_format::ChatMessage;
+use llimorse::ChatListener;
+use llimorse::line_format::ChatMessage;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use tracing::error;
 
-/// [`llimo::ChatListener`] implementation to keep a log in a file.
+/// [`llimorse::ChatListener`] implementation to keep a log in a file.
 #[derive(Debug)]
 pub struct SessionLog {
     /// Where to write the log output
@@ -30,7 +30,7 @@ impl SessionLog {
 
     /// Load the log from `load_from`.
     ///
-    /// This log can be applied via [`llimo::Agent::push_history()`].
+    /// This log can be applied via [`llimorse::Agent::push_history()`].
     pub fn load<P: AsRef<Path>>(load_from: P) -> Result<Vec<ChatMessage>> {
         BufReader::new(File::open(load_from)?)
             .lines()
@@ -50,7 +50,7 @@ impl SessionLog {
     }
 
     /// Log the given `message` to the output, raising errors.
-    fn do_log(&mut self, message: &llimo::line_format::ChatMessage) -> Result<()> {
+    fn do_log(&mut self, message: &llimorse::line_format::ChatMessage) -> Result<()> {
         let Some(file) = &mut self.output else {
             return Ok(());
         };

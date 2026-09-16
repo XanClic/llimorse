@@ -3,12 +3,12 @@
 use super::history::{ChatHistory, HistoryEntryType};
 use anyhow::Result;
 use futures::StreamExt;
-use llimo::{ChatListener, StreamingChunk};
+use llimorse::{ChatListener, StreamingChunk};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc};
 
-/// State of the agent-running part of the llimo-based chat application
+/// State of the agent-running part of the llimorse-based chat application
 pub(super) struct ChatAgent {
     /// The chat history as shared with the agent
     chat_history: Arc<Mutex<ChatHistory>>,
@@ -42,14 +42,14 @@ impl ChatAgent {
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
     ///
     /// Will itself set the exit flag before returning.
-    pub async fn run(&mut self, agent: llimo::Agent<impl ChatListener>) -> Result<()> {
+    pub async fn run(&mut self, agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
         let result = self.do_run(agent).await;
         self.exit.store(true, Ordering::Relaxed);
         result
     }
 
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
-    async fn do_run(&mut self, mut agent: llimo::Agent<impl ChatListener>) -> Result<()> {
+    async fn do_run(&mut self, mut agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
         while let Some(message) = self.user_message_submit.recv().await {
             // The main loop will push an empty message to remind us to check the exit flag, so do
             // that here
