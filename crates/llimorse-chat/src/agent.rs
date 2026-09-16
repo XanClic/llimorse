@@ -139,7 +139,8 @@ impl ChatAgent {
     /// Push the given string into the chat history, processing newlines
     fn push_history(&self, string: &str, kind: HistoryEntryType) {
         let mut history = self.chat_history.lock().unwrap();
-        history.push_lines(string, kind, false);
+        // Put user messages on a new line, always, as they can never be streamed content
+        history.push_lines(string, kind, kind == HistoryEntryType::User);
         drop(history);
 
         self.update_ui.notify_one();
