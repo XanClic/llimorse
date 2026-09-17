@@ -1,0 +1,40 @@
+name: Deploy Rust Docs to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+
+# Grant the workflow permission to deploy to Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build documentation
+        run: cargo doc --no-deps --document-private-items
+
+      - name: Create root index.html
+        # Redirectshe GitHub Pages root to llimorse
+        run: echo '<meta http-equiv="refresh" content="0; url=llimorse/index.html">' > target/doc/index.html
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "target/doc"
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
