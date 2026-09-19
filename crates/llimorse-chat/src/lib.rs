@@ -42,7 +42,7 @@ impl<I: UiState> App<I> {
     /// Create a new application state around `agent`, pre-feeding the chat log with `history`.
     pub fn new_with_history<
         L: ChatListener + Send + 'static,
-        F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>,
+        F: FnOnce(&Agent<L>, Arc<Mutex<ChatHistory>>) -> Result<I>,
     >(
         mut agent: Agent<L>,
         history: &[ChatMessage],
@@ -57,7 +57,7 @@ impl<I: UiState> App<I> {
         let chat_history = Arc::new(Mutex::new(chat_history));
         let exit = Arc::new(AtomicBool::new(false));
 
-        let ui = create_ui(Arc::clone(&chat_history))?;
+        let ui = create_ui(&agent, Arc::clone(&chat_history))?;
 
         let (user_message_send, user_message_recv) = mpsc::unbounded_channel();
         let agent_update = Arc::new(Notify::new());
@@ -95,7 +95,7 @@ impl<I: UiState> App<I> {
     /// Create a new application state around `agent`.
     pub fn new<
         L: ChatListener + Send + 'static,
-        F: FnOnce(Arc<Mutex<ChatHistory>>) -> Result<I>,
+        F: FnOnce(&Agent<L>, Arc<Mutex<ChatHistory>>) -> Result<I>,
     >(
         agent: Agent<L>,
         create_ui: F,

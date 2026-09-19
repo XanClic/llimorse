@@ -204,11 +204,11 @@ async fn main() -> Result<()> {
     ));
 
     let mut app = if let Some(resume_history) = resume_history {
-        llimorse_chat::App::new_with_history(agent, &resume_history, |history| {
+        llimorse_chat::App::new_with_history(agent, &resume_history, |_agent, history| {
             Ok(TermUi::new(history))
         })?
     } else {
-        llimorse_chat::App::new(agent, |history| Ok(TermUi::new(history)))?
+        llimorse_chat::App::new(agent, |_agent, history| Ok(TermUi::new(history)))?
     };
 
     app.run().await
