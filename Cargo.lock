@@ -2757,6 +2757,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "futures",
+ "llimorse",
  "llimorse-chat",
  "ratatui",
  "ratatui-textarea",

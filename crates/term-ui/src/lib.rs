@@ -8,6 +8,7 @@ mod wrap;
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
+use llimorse::{Agent, ChatListener};
 use llimorse_chat::history::HistoryEntryType;
 use llimorse_chat::{ChatHistory, ui};
 use ratatui::layout::{Alignment, Constraint, Layout, Margin};
@@ -34,6 +35,12 @@ pub struct TermUi {
     /// `term` stored here.)
     term: Option<DefaultTerminal>,
 
+    /// The name of the model being run
+    model_name: String,
+
+    /// The maximum number of tokens that fit in the context
+    context_size: Option<u64>,
+
     /// Produces terminal events, asynchronously
     events: ct::EventStream,
 
@@ -52,7 +59,7 @@ pub struct TermUi {
 
 impl TermUi {
     /// Create the term state with `chat_history`
-    pub fn new(chat_history: Arc<Mutex<ChatHistory>>) -> Self {
+    pub fn new(agent: &Agent<impl ChatListener>, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
         let term = ratatui::init();
         set_up_term();
 
@@ -63,6 +70,8 @@ impl TermUi {
 
         TermUi {
             term: Some(term),
+            model_name: agent.model_name().to_string(),
+            context_size: agent.context_size(),
             events: ct::EventStream::new(),
             chat_history,
             history_scroll: Saturating(usize::MAX),
@@ -231,11 +240,23 @@ impl TermUi {
             lines: history_lines,
         };
 
-        let paragraph = Paragraph::new(paragraph_content).block(Block::bordered().title(format!(
-            "Chat: {:.1}k+{:.1}k",
-            chat_history.token_usage().0 as f32 * 1.0e-3,
-            chat_history.token_usage().1 as f32 * 1.0e-3
-        )));
+        let title = if let Some(context_size) = self.context_size {
+            format!(
+                " {}: {:.1}k+{:.1}k / {:.1}k ",
+                self.model_name,
+                chat_history.token_usage().0 as f32 * 1.0e-3,
+                chat_history.token_usage().1 as f32 * 1.0e-3,
+                context_size as f32 * 1.0e-3,
+            )
+        } else {
+            format!(
+                " {}: {:.1}k+{:.1}k ",
+                self.model_name,
+                chat_history.token_usage().0 as f32 * 1.0e-3,
+                chat_history.token_usage().1 as f32 * 1.0e-3,
+            )
+        };
+        let paragraph = Paragraph::new(paragraph_content).block(Block::bordered().title(title));
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         let history_len = chat_history.lines().len();
