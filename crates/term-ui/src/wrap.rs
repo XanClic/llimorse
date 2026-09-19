@@ -16,12 +16,11 @@ pub(crate) fn wrapped_line_count(line: &str, mode: WrapMode, width: usize) -> us
     let width = width.max(1);
     match mode {
         WrapMode::None => 1,
-        WrapMode::Glyph => {
-            split_range_by_grapheme_width(line, 0, line.len(), width)
-        }
+        WrapMode::Glyph => split_range_by_grapheme_width(line, 0, line.len(), width),
         WrapMode::Word => wrap_word_chunks(line, width, false),
         WrapMode::WordOrGlyph => wrap_word_chunks(line, width, true),
-    }.max(1)
+    }
+    .max(1)
 }
 
 /// Wraps the given line at word boundaries, falling back to grapheme splitting for words wider
@@ -77,12 +76,7 @@ fn wrap_word_chunks(line: &str, width: usize, fallback_to_glyph: bool) -> usize 
 }
 
 /// Wraps the given byte range of a line at grapheme boundaries, accounting for wide characters.
-fn split_range_by_grapheme_width(
-    line: &str,
-    start: usize,
-    end: usize,
-    width: usize,
-) -> usize {
+fn split_range_by_grapheme_width(line: &str, start: usize, end: usize, width: usize) -> usize {
     let mut line_count = 0;
 
     let mut segment_start = start;
