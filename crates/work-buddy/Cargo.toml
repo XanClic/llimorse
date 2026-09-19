@@ -8,6 +8,7 @@ anyhow.workspace = true
 chrono = "0.4"
 clap.workspace = true
 fastrand = "2"
+helpers.workspace = true
 llimorse.workspace = true
 llimorse-chat.workspace = true
 schemars.workspace = true

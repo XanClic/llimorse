@@ -1,12 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/llimorse", "crates/llimorse-chat", "crates/term-ui", "crates/work-buddy"]
+members = [
+    "crates/helpers",
+    "crates/llimorse",
+    "crates/llimorse-chat",
+    "crates/term-ui",
+    "crates/work-buddy",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+helpers = { path = "crates/helpers" }
 llimorse = { path = "crates/llimorse" }
 llimorse-chat = { path = "crates/llimorse-chat" }
 term-ui = { path = "crates/term-ui" }

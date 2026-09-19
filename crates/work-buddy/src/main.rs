@@ -3,14 +3,13 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-mod macros;
 mod tools;
 
-use crate::macros::{Mergeable, derive_merge};
 use anyhow::{Context, Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
+use helpers::{Mergeable, derive_merge};
 use llimorse_chat::log::SessionLog;
 use serde::Deserialize;
 use std::path::PathBuf;

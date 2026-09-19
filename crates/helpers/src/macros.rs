@@ -1,9 +1,8 @@
-//! Macros for work buddy.
+//! Macros for this workspace.
 
 /// Allow merging two objects of the same type into one.
-pub(crate) trait Mergeable {
+pub trait Mergeable {
     /// Merge `other` into `self`, with `other` taking precedence.
-    #[allow(dead_code)]
     fn merge(&mut self, other: Self);
 
     /// Merge `other` into `self`, with `self` taking precedence.
@@ -35,6 +34,7 @@ impl Mergeable for bool {
 }
 
 /// Derive the `Mergeable` trait for structs composed entirely of `Mergeable` fields.
+#[macro_export]
 macro_rules! derive_merge {
     (
         $(#[$attr:meta])*
@@ -65,4 +65,4 @@ macro_rules! derive_merge {
     };
 }
 
-pub(crate) use derive_merge;
+pub use derive_merge;
