@@ -155,7 +155,8 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
 
-    let llm = llimorse::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT));
+    let llm =
+        llimorse::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT), None).await?;
     let mut agent = llimorse::Agent::new_with_listener(llm, session_log_file);
 
     if let Some(history) = &resume_history {

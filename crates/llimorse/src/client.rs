@@ -1,9 +1,11 @@
 //! Client for llama-server’s (llama.cpp) OpenAI-compatible chat completions API, using native
 //! template tool-calling (--jinja) and SSE streaming.
 
-use super::line_format::{ChatCompletion, ChatMessage, StreamOptions, ToolChoice, ToolDefinition};
+use super::line_format::{
+    ChatCompletion, ChatMessage, Models, StreamOptions, ToolChoice, ToolDefinition,
+};
 use super::streaming_result::StreamingResult;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::Stream;
 use std::time;
 use tracing::{debug, warn};
@@ -16,23 +18,86 @@ pub struct Client {
 
     /// Chat endpoint URL
     url: String,
+
+    /// Model to use
+    model: String,
+
+    /// Context size in tokens
+    context_size: Option<u64>,
 }
 
 impl Client {
     /// Connect to the given `base_url` llama-server instance.
-    pub fn new(base_url: &str) -> Self {
-        Client {
-            http: reqwest::Client::builder()
-                // Per-read, not total: a total timeout counts the whole SSE stream against the
-                // deadline, so it kills long generations (at ~19 t/s, 600 s cut off at ~11k
-                // tokens) instead of detecting a stalled server.  This resets on every chunk, so
-                // it only fires when nothing arrives at all.  Generous, because it also covers
-                // prompt processing before the first token.
-                .read_timeout(time::Duration::from_secs(300))
-                .build()
-                .expect("building http client"),
-            url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')),
+    ///
+    /// If `model_name` is given, select the given model from what is available on the server. If
+    /// `None`, and there is only a single model, select that; if there are more, select the
+    /// `"default"` model.
+    pub async fn new(base_url: &str, model_name: Option<&str>) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            // Per-read, not total: a total timeout counts the whole SSE stream against the
+            // deadline, so it kills long generations (at ~19 t/s, 600 s cut off at ~11k tokens)
+            // instead of detecting a stalled server.  This resets on every chunk, so it only fires
+            // when nothing arrives at all.  Generous, because it also covers prompt processing
+            // before the first token.
+            .read_timeout(time::Duration::from_secs(300))
+            .build()
+            .expect("building http client");
+
+        let base_url = base_url.trim_end_matches('/');
+        let models_url = format!("{base_url}/v1/models");
+        let models_info = http
+            .get(&models_url)
+            .send()
+            .await
+            .map_err(|err| anyhow!("Failed to query model info on {models_url}: {err}"))?;
+        let status = models_info.status();
+        let models_info = models_info
+            .text()
+            .await
+            .map_err(|err| anyhow!("Failed to query model info on {models_url}: {err}"))?;
+        if !status.is_success() {
+            bail!("Failed to query model info on {models_url}: {status}: {models_info}")
         }
+
+        let models_info: Models = serde_json::from_str(&models_info).map_err(|err| {
+            anyhow!("Failed to parse model info from {models_url}: {models_info}: {err}")
+        })?;
+
+        let model = if model_name.is_none() && models_info.data.len() == 1 {
+            &models_info.data[0]
+        } else {
+            let model_name = model_name.unwrap_or("default");
+            models_info
+                .data
+                .iter()
+                .find(|model| {
+                    model.id == model_name || model.aliases.iter().any(|alias| alias == model_name)
+                })
+                .ok_or_else(|| {
+                    let models = models_info
+                        .data
+                        .iter()
+                        .map(|model| {
+                            let aliases = model
+                                .aliases
+                                .iter()
+                                .map(|a| format!("\"{a}\")"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("- {} (aliases: {aliases})", model.id)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow!("Model \"{model_name}\" not found, available models:\n{models}")
+                })?
+        };
+
+        Ok(Client {
+            http,
+            url: format!("{base_url}/v1/chat/completions"),
+            model: model.id.clone(),
+            context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
+        })
     }
 
     /// Submit the given chat history, providing the given tools.
@@ -46,7 +111,7 @@ impl Client {
         tool_choice: T,
     ) -> Result<StreamingResult<impl Stream<Item = reqwest::Result<bytes::Bytes>> + use<T>>> {
         let request = ChatCompletion {
-            model: "default",
+            model: &self.model,
             messages,
             stream: true,
             stream_options: StreamOptions {
@@ -115,5 +180,15 @@ impl Client {
         }
 
         Ok(response)
+    }
+
+    /// Return the name of the model in use
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    /// Return the number of tokens that fit into the context
+    pub fn context_size(&self) -> Option<u64> {
+        self.context_size
     }
 }

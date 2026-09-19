@@ -345,6 +345,16 @@ impl<L: ChatListener> Agent<L> {
             self.token_usage.completion_tokens as usize,
         )
     }
+
+    /// Return the name of the model in use
+    pub fn model_name(&self) -> &str {
+        self.client.model_name()
+    }
+
+    /// Return the number of tokens that fit into the context
+    pub fn context_size(&self) -> Option<u64> {
+        self.client.context_size()
+    }
 }
 
 impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> AgentRunning<'a, S, L> {

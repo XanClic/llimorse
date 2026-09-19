@@ -376,3 +376,38 @@ impl ToolCallParams {
         }
     }
 }
+
+/// Info for all models as returned on /v1/models
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Models {
+    /// More detailed information for each model
+    pub data: Vec<Model>,
+}
+
+/// Information for a single model provided by the server
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Model {
+    /// Model ID
+    pub id: String,
+
+    /// Model aliases
+    #[serde(default)]
+    pub aliases: Vec<String>,
+
+    /// Tags
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Meta information
+    pub meta: Option<ModelMeta>,
+}
+
+/// Model metadata
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelMeta {
+    /// Context size in tokens
+    pub n_ctx: Option<u64>,
+
+    /// Context size in tokens from training
+    pub n_ctx_train: Option<u64>,
+}
