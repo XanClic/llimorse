@@ -3,7 +3,6 @@
 use super::line_format::{AssistantMessage, CustomCall, FunctionCall, ToolCall, ToolCallParams};
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::Stream;
-use futures::future::FusedFuture;
 use futures::stream::FusedStream;
 use pin_project::pin_project;
 use serde::Deserialize;
@@ -329,41 +328,6 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for StreamingResult
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedStream for StreamingResult<S> {
     fn is_terminated(&self) -> bool {
         self.chunks.is_empty() && self.stream.is_terminated()
-    }
-}
-
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Future for StreamingResult<S> {
-    type Output = Result<(AssistantMessage, Option<TokenUsage>)>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        ctx: &mut Context<'_>,
-    ) -> Poll<Result<(AssistantMessage, Option<TokenUsage>)>> {
-        if !<Self as FusedStream>::is_terminated(&self) {
-            loop {
-                match self.as_mut().poll_next(ctx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(None) => break,
-                    Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(err)),
-                    Poll::Ready(Some(Ok(_))) => continue,
-                }
-            }
-        }
-
-        let this = self.project();
-        let Some(full_message) = this.full_message.take() else {
-            return Poll::Ready(Err(anyhow!(
-                "Full message already taken or error occurred during streaming"
-            )));
-        };
-
-        Poll::Ready(Ok((full_message, this.token_usage.take())))
-    }
-}
-
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedFuture for StreamingResult<S> {
-    fn is_terminated(&self) -> bool {
-        <Self as FusedStream>::is_terminated(self) && self.full_message.is_none()
     }
 }
 

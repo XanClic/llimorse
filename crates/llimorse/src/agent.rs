@@ -482,33 +482,6 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Future
-    for AgentResponse<'_, S, L>
-{
-    type Output = Result<()>;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Result<()>> {
-        let mut this = self.project();
-
-        if this.stream.is_terminated() {
-            // Technically not true if terminated because of error, but that’s your fault for
-            // using both `poll_next()` and `poll()` then
-            return Poll::Ready(Ok(()));
-        }
-
-        loop {
-            match this.stream.as_mut().poll_next(ctx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(err)),
-                Poll::Ready(Some(_)) => continue,
-                Poll::Ready(None) => {
-                    return Poll::Ready(Ok(()));
-                }
-            }
-        }
-    }
-}
-
 /// Helper struct for properly formatting call parameters for display.
 pub struct DisplayCall<'a, L: ChatListener> {
     /// Agent; required to parse the call parameters
