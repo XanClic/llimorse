@@ -130,6 +130,12 @@ impl TermUi {
                     return Ok(Some(ui::Event::Input(message)));
                 }
 
+                ct::KeyCode::Enter
+                    if event.modifiers.is_empty() && !self.queued_prompts.is_empty() =>
+                {
+                    return Ok(Some(ui::Event::ForceSubmitQueued));
+                }
+
                 ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
 
                 ct::KeyCode::PageUp => {
@@ -325,6 +331,7 @@ impl ui::UiState for TermUi {
 
     fn notify(&mut self, notification: ui::Notification) -> Result<()> {
         match notification {
+            ui::Notification::Exit => (), // To be handled by the parent
             ui::Notification::Update => (),
             ui::Notification::PromptQueued(p) => self.queued_prompts.push_back(p),
             ui::Notification::PromptSubmitted => {

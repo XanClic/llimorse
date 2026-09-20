@@ -14,16 +14,24 @@ pub trait UiState {
 }
 
 /// Application state level events that can come from the UI
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     /// Exit requested
     Exit,
 
     /// User submitted a message as input
     Input(String),
+
+    /// Force submitting all queued prompts *right now*
+    ForceSubmitQueued,
 }
 
 /// Notifications to the UI
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Notification {
+    /// Exit requested
+    Exit,
+
     /// Update the interface
     Update,
 

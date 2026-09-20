@@ -3,9 +3,10 @@
 use super::history::{ChatHistory, HistoryEntryType};
 use super::ui;
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use llimorse::{ChatListener, StreamingChunk};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::mem;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -14,29 +15,41 @@ pub(super) struct ChatAgent {
     /// The chat history as shared with the agent
     chat_history: Arc<Mutex<ChatHistory>>,
 
-    /// User messages to be submitted to the LLM
-    user_message_submit: mpsc::UnboundedReceiver<String>,
+    /// Notifications from the application
+    notifications: mpsc::UnboundedReceiver<Notification>,
+
+    /// User messages queued
+    queued_messages: VecDeque<String>,
 
     /// Notify the UI to redraw
     ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
+}
 
-    /// Set once we are supposed to exit
-    exit: Arc<AtomicBool>,
+/// Notifications to be sent to the agent
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Notification {
+    /// Notify of an exit event
+    Exit,
+
+    /// Queue the given prompt until the next cycle where we can naturally submit it
+    QueuePrompt(String),
+
+    /// Force submitting all queued prompts *right now*
+    ForceSubmitQueued,
 }
 
 impl ChatAgent {
     /// Create a new instance.
     pub fn new(
         chat_history: Arc<Mutex<ChatHistory>>,
-        user_message_submit: mpsc::UnboundedReceiver<String>,
+        notifications: mpsc::UnboundedReceiver<Notification>,
         ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
-        exit: Arc<AtomicBool>,
     ) -> Self {
         ChatAgent {
             chat_history,
-            user_message_submit,
+            notifications,
+            queued_messages: VecDeque::new(),
             ui_notifications,
-            exit,
         }
     }
 
@@ -45,43 +58,105 @@ impl ChatAgent {
     /// Will itself set the exit flag before returning.
     pub async fn run(&mut self, agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
         let result = self.do_run(agent).await;
-        self.exit.store(true, Ordering::Relaxed);
+        let _ = self.ui_notifications.send(ui::Notification::Exit);
         result
     }
 
-    /// Run agent requests in a loop until the exit flag is set (or an error occurs).
-    async fn do_run(&mut self, mut agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
-        while let Some(message) = self.user_message_submit.recv().await {
-            // The main loop will push an empty message to remind us to check the exit flag, so do
-            // that here
-            if self.exit.load(Ordering::Relaxed) {
-                return Ok(());
-            }
+    /// Process incoming notifications until finding a user or exit message.
+    ///
+    /// Return `false` if the channel is closed (or an exit event is received).
+    ///
+    /// The caller **must** submit `self.queued_messages` immediately (because this function
+    /// ignores `ForceSubmitQueued`, assuming the caller will do so).
+    async fn process_notifications(&mut self) -> bool {
+        while let Some(notification) = self.notifications.recv().await {
+            match notification {
+                Notification::Exit => return false,
 
+                Notification::QueuePrompt(p) => {
+                    self.queued_messages.push_back(p);
+                    return true;
+                }
+
+                // Ignore this, the caller will submit them all right now anyway.
+                Notification::ForceSubmitQueued => (),
+            }
+        }
+
+        false
+    }
+
+    /// Process all available incoming notifications (non-blocking)
+    ///
+    /// Return `false` if an exit event is received.
+    ///
+    /// The caller **must** submit `self.queued_messages` immediately (because this function
+    /// ignores `ForceSubmitQueued`, assuming the caller will do so).
+    fn process_available_notifications(&mut self) -> bool {
+        while let Ok(notification) = self.notifications.try_recv() {
+            match notification {
+                Notification::Exit => return false,
+
+                Notification::QueuePrompt(p) => self.queued_messages.push_back(p),
+
+                // Ignore this, the caller will submit them all right now anyway.
+                Notification::ForceSubmitQueued => (),
+            }
+        }
+
+        true
+    }
+
+    /// Push all messages currently in `self.queued_messages` onto the agent/chat history.
+    ///
+    /// This does not yet submit a request to the agent.
+    fn submit_queued_user_messages(&mut self, agent: &mut llimorse::Agent<impl ChatListener>) {
+        let messages = mem::take(&mut self.queued_messages);
+        for message in messages {
             let _ = self
                 .ui_notifications
                 .send(ui::Notification::PromptSubmitted);
             self.push_history(&message, HistoryEntryType::User);
             agent.push_user(message);
-            while let Ok(message) = self.user_message_submit.try_recv() {
-                let _ = self
-                    .ui_notifications
-                    .send(ui::Notification::PromptSubmitted);
-                self.push_history(&message, HistoryEntryType::User);
-                agent.push_user(message);
-            }
+        }
+    }
+
+    /// Run agent requests in a loop until the exit flag is set (or an error occurs).
+    async fn do_run(&mut self, mut agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
+        while self.process_notifications().await && self.process_available_notifications() {
+            self.submit_queued_user_messages(&mut agent);
 
             loop {
-                let mut result = agent.submit().await?;
+                let mut streaming = agent.submit().await?;
 
-                while let Some(chunk) = result.next().await {
-                    self.process_chunk(chunk?);
-                    if self.exit.load(Ordering::Relaxed) {
-                        return Ok(());
+                loop {
+                    futures::select! {
+                        chunk = streaming.next() => {
+                            if let Some(chunk) = chunk {
+                                self.process_chunk(chunk?);
+                            } else {
+                                break;
+                            }
+                        }
+
+                        notification = self.notifications.recv().fuse() => {
+                            if let Some(notification) = notification {
+                                 match notification {
+                                     Notification::Exit => return Ok(()),
+                                     Notification::QueuePrompt(p) => {
+                                         self.queued_messages.push_back(p);
+                                     }
+                                     Notification::ForceSubmitQueued => {
+                                        streaming.force_finalize();
+                                        break;
+                                     }
+                                 }
+                            }
+                        }
                     }
                 }
 
-                drop(result);
+                drop(streaming);
 
                 let mut pending = agent
                     .execute_pending_calls(
@@ -113,12 +188,11 @@ impl ChatAgent {
                     )
                     .await;
 
-                while let Ok(message) = self.user_message_submit.try_recv() {
-                    let _ = self
-                        .ui_notifications
-                        .send(ui::Notification::PromptSubmitted);
-                    self.push_history(&message, HistoryEntryType::User);
-                    agent.push_user(message);
+                if !self.process_available_notifications() {
+                    return Ok(());
+                }
+                if !self.queued_messages.is_empty() {
+                    self.submit_queued_user_messages(&mut agent);
                     pending = true;
                 }
 

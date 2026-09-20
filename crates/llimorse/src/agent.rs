@@ -386,6 +386,22 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     pub fn agent(&self) -> &Agent<L> {
         self.agent
     }
+
+    /// Abort the incoming transmission, and treat it as finished
+    pub fn force_finalize(&mut self) {
+        self.streaming.force_finalize();
+        self.terminated = true;
+
+        // `force_finalize()` *must* create this message
+        let message = self
+            .streaming
+            .full_message()
+            .expect("Failed to generate any message");
+        if let Some(ref tool_calls) = message.tool_calls {
+            self.agent.pending_calls.extend(tool_calls.iter().cloned());
+        }
+        self.agent.push(message);
+    }
 }
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener>

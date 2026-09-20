@@ -171,11 +171,28 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
     /// Return the full message after streaming is done.
     ///
     /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
-    /// and only if there was no error.
+    /// and only if there was no error; *or* after [`Self::force_finalize()`].
     ///
     /// `.take()`s the full message, so will return it only once.
     pub(crate) fn full_message_pinned(self: Pin<&mut Self>) -> Option<AssistantMessage> {
         self.project().full_message.take()
+    }
+
+    /// Return the full message after streaming is done.
+    ///
+    /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
+    /// and only if there was no error; *or* after [`Self::force_finalize()`].
+    ///
+    /// `.take()`s the full message, so will return it only once.
+    pub(crate) fn full_message(&mut self) -> Option<AssistantMessage> {
+        self.full_message.take()
+    }
+
+    /// Abort the incoming transmission, and treat it as finished
+    pub fn force_finalize(&mut self) {
+        self.full_message = Some(mem::take(&mut self.constructing).force_finalize());
+        self.stream.terminate();
+        mem::take(&mut self.chunks);
     }
 }
 
@@ -333,6 +350,14 @@ struct NewlineSplit<S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     buffer: Vec<u8>,
 }
 
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> NewlineSplit<S> {
+    /// Mark as terminated (in case of error).
+    fn terminate(&mut self) {
+        self.eof = true;
+        mem::take(&mut self.buffer);
+    }
+}
+
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> NewlineSplitProjection<'_, S> {
     /// Split the first line off of [`NewlineSplit::buffer`].
     fn split_line_from_buffer(&mut self) -> Option<Result<String>> {
@@ -422,6 +447,10 @@ trait StreamingObject {
 
     /// Finalize the object by turning it into the non-streaming variant.
     fn finalize(self) -> Result<Self::NonStreaming>;
+
+    /// Force-finalize the object, turning it into the non-streaming variant, discarding fatally
+    /// incomplete parts (e.g. tool calls).
+    fn force_finalize(self) -> Self::NonStreaming;
 }
 
 impl StreamingObject for StreamingAssistantMessage {
@@ -477,6 +506,18 @@ impl StreamingObject for StreamingAssistantMessage {
             tool_calls,
         })
     }
+
+    fn force_finalize(self) -> AssistantMessage {
+        // We completely discard all tool calls because you never know if they are complete or not
+        // (TODO: Find out how we can find out whether they are complete or not. It might be that
+        // llama-server gives them strictly in order, so if we have *some* information about tool
+        // call `i+1`, tool call `i` must be complete.)
+        AssistantMessage {
+            content: self.content,
+            reasoning_content: self.reasoning_content,
+            tool_calls: Default::default(),
+        }
+    }
 }
 
 impl StreamingObject for StreamingToolCall {
@@ -514,6 +555,10 @@ impl StreamingObject for StreamingToolCall {
             .with_context(|| format!("Tool call {}", self.index))?;
 
         Ok(ToolCall { id, call })
+    }
+
+    fn force_finalize(self) -> ToolCall {
+        todo!("Incomplete tool calls forbidden for the moment")
     }
 }
 
@@ -554,6 +599,10 @@ impl StreamingObject for StreamingToolCallParams {
             },
         })
     }
+
+    fn force_finalize(self) -> ToolCallParams {
+        todo!("Incomplete tool calls forbidden for the moment")
+    }
 }
 
 impl StreamingObject for StreamingFunctionCall {
@@ -579,6 +628,10 @@ impl StreamingObject for StreamingFunctionCall {
 
         Ok(FunctionCall { name, arguments })
     }
+
+    fn force_finalize(self) -> FunctionCall {
+        todo!("Incomplete tool calls forbidden for the moment")
+    }
 }
 
 impl StreamingObject for StreamingCustomCall {
@@ -601,5 +654,9 @@ impl StreamingObject for StreamingCustomCall {
         let input = self.input.ok_or_else(|| anyhow!("Missing tool input"))?;
 
         Ok(CustomCall { name, input })
+    }
+
+    fn force_finalize(self) -> CustomCall {
+        todo!("Incomplete tool calls forbidden for the moment")
     }
 }
