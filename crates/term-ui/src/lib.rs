@@ -17,6 +17,7 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,9 @@ pub struct TermUi {
 
     /// User message input widget
     input_area: ratatui_textarea::TextArea<'static>,
+
+    /// Messages that are queued for sending
+    queued_prompts: VecDeque<String>,
 }
 
 impl TermUi {
@@ -81,6 +85,7 @@ impl TermUi {
             history_scroll: Saturating(usize::MAX),
             history_lines_on_screen: 0,
             input_area,
+            queued_prompts: VecDeque::new(),
         }
     }
 
@@ -187,14 +192,17 @@ impl TermUi {
             .min(MAX_HEIGHT) as u16
             + 2; // account for the border
 
-        let layout = Layout::vertical([
-            Constraint::Percentage(100),
-            Constraint::Min(input_outer_height),
-        ])
-        .split(area);
+        let mut layout = Vec::with_capacity(self.queued_prompts.len() + 2);
+        layout.push(Constraint::Percentage(100));
+        for _ in 0..self.queued_prompts.len() {
+            layout.push(Constraint::Min(1));
+        }
+        layout.push(Constraint::Min(input_outer_height));
+
+        let layout = Layout::vertical(layout).split(area);
 
         let history_cell = layout[0];
-        let input_cell = layout[1];
+        let input_cell = layout[self.queued_prompts.len() + 1];
 
         let chat_history = self.chat_history.lock().unwrap();
         let history_line_count = history_cell.height.saturating_sub(2) as usize;
@@ -276,6 +284,17 @@ impl TermUi {
             }),
             &mut scrollbar_state,
         );
+        for (i, p) in self.queued_prompts.iter().enumerate() {
+            let line = ratatui::text::Line {
+                style: Style::new().white().on_blue(),
+                alignment: None,
+                spans: vec![ratatui::text::Span {
+                    style: Default::default(),
+                    content: p.into(),
+                }],
+            };
+            frame.render_widget(line, layout[i + 1]);
+        }
         frame.render_widget(&self.input_area, input_cell);
     }
 }
@@ -285,8 +304,6 @@ impl ui::UiState for TermUi {
 
     /// Handle input on the terminal, and redraw
     async fn get_event(&mut self) -> Result<ui::Event> {
-        self.draw()?;
-
         while let Some(result) = self.events.next().await {
             let event = match result? {
                 ct::Event::Paste(text) => self.handle_paste_event(text),
@@ -304,6 +321,18 @@ impl ui::UiState for TermUi {
 
         // Stream ended
         Ok(ui::Event::Exit)
+    }
+
+    fn notify(&mut self, notification: ui::Notification) -> Result<()> {
+        match notification {
+            ui::Notification::Update => (),
+            ui::Notification::PromptQueued(p) => self.queued_prompts.push_back(p),
+            ui::Notification::PromptSubmitted => {
+                self.queued_prompts.pop_front();
+            }
+        }
+
+        self.draw()
     }
 }
 

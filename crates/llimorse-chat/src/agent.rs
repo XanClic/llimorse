@@ -1,12 +1,13 @@
 //! Handle the agent-running part.
 
 use super::history::{ChatHistory, HistoryEntryType};
+use super::ui;
 use anyhow::Result;
 use futures::StreamExt;
 use llimorse::{ChatListener, StreamingChunk};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 /// State of the agent-running part of the llimorse-based chat application
 pub(super) struct ChatAgent {
@@ -17,7 +18,7 @@ pub(super) struct ChatAgent {
     user_message_submit: mpsc::UnboundedReceiver<String>,
 
     /// Notify the UI to redraw
-    update_ui: Arc<Notify>,
+    ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
 
     /// Set once we are supposed to exit
     exit: Arc<AtomicBool>,
@@ -28,13 +29,13 @@ impl ChatAgent {
     pub fn new(
         chat_history: Arc<Mutex<ChatHistory>>,
         user_message_submit: mpsc::UnboundedReceiver<String>,
-        update_ui: Arc<Notify>,
+        ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
         exit: Arc<AtomicBool>,
     ) -> Self {
         ChatAgent {
             chat_history,
             user_message_submit,
-            update_ui,
+            ui_notifications,
             exit,
         }
     }
@@ -57,9 +58,15 @@ impl ChatAgent {
                 return Ok(());
             }
 
+            let _ = self
+                .ui_notifications
+                .send(ui::Notification::PromptSubmitted);
             self.push_history(&message, HistoryEntryType::User);
             agent.push_user(message);
             while let Ok(message) = self.user_message_submit.try_recv() {
+                let _ = self
+                    .ui_notifications
+                    .send(ui::Notification::PromptSubmitted);
                 self.push_history(&message, HistoryEntryType::User);
                 agent.push_user(message);
             }
@@ -107,6 +114,9 @@ impl ChatAgent {
                     .await;
 
                 while let Ok(message) = self.user_message_submit.try_recv() {
+                    let _ = self
+                        .ui_notifications
+                        .send(ui::Notification::PromptSubmitted);
                     self.push_history(&message, HistoryEntryType::User);
                     agent.push_user(message);
                     pending = true;
@@ -138,6 +148,6 @@ impl ChatAgent {
         history.push_lines(string, kind, kind == HistoryEntryType::User);
         drop(history);
 
-        self.update_ui.notify_one();
+        let _ = self.ui_notifications.send(ui::Notification::Update);
     }
 }

@@ -7,10 +7,10 @@ pub trait UiState {
     type Error: Into<anyhow::Error> + Send + Sync + 'static;
 
     /// Await an event on the UI.
-    ///
-    /// Notably, the future is dropped whenever the agent has an update, and then later re-called,
-    /// so if the UI needs redrawn on updates, it may be done in this function.
     async fn get_event(&mut self) -> Result<Event, Self::Error>;
+
+    /// Notify the UI about something.
+    fn notify(&mut self, notification: Notification) -> Result<(), Self::Error>;
 }
 
 /// Application state level events that can come from the UI
@@ -20,4 +20,16 @@ pub enum Event {
 
     /// User submitted a message as input
     Input(String),
+}
+
+/// Notifications to the UI
+pub enum Notification {
+    /// Update the interface
+    Update,
+
+    /// User message queued to be submitted to the LLM
+    PromptQueued(String),
+
+    /// User message has been submitted to the LLM
+    PromptSubmitted,
 }

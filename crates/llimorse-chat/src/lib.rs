@@ -17,7 +17,8 @@ use llimorse::{Agent, ChatListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
+use tokio::time::{self, Duration};
 pub use ui::UiState;
 
 /// The application state
@@ -31,8 +32,8 @@ pub struct App<I: UiState> {
     /// Submit user messages to the LLM
     user_message_submit: mpsc::UnboundedSender<String>,
 
-    /// Notification from the agent to redraw the UI
-    agent_update: Arc<Notify>,
+    /// Notification to the UI
+    ui_notifications: mpsc::UnboundedReceiver<ui::Notification>,
 
     /// Set once we are supposed to exit
     exit: Arc<AtomicBool>,
@@ -60,10 +61,9 @@ impl<I: UiState> App<I> {
         let ui = create_ui(&agent, Arc::clone(&chat_history))?;
 
         let (user_message_send, user_message_recv) = mpsc::unbounded_channel();
-        let agent_update = Arc::new(Notify::new());
+        let (send_ui_notifications, ui_notifications) = mpsc::unbounded_channel();
 
         let agent_thread = thread::spawn({
-            let update_ui = Arc::clone(&agent_update);
             let exit = Arc::clone(&exit);
             move || {
                 tokio::runtime::Builder::new_current_thread()
@@ -71,8 +71,12 @@ impl<I: UiState> App<I> {
                     .build()
                     .unwrap()
                     .block_on(async move {
-                        let mut wba =
-                            ChatAgent::new(chat_history, user_message_recv, update_ui, exit);
+                        let mut wba = ChatAgent::new(
+                            chat_history,
+                            user_message_recv,
+                            Arc::new(send_ui_notifications),
+                            exit,
+                        );
                         if let Err(err) = wba.run(agent).await {
                             panic!("Agent error: {err}");
                         }
@@ -86,7 +90,7 @@ impl<I: UiState> App<I> {
             ui,
 
             user_message_submit: user_message_send,
-            agent_update,
+            ui_notifications,
 
             exit,
         })
@@ -105,16 +109,33 @@ impl<I: UiState> App<I> {
 
     /// Run the application until it finds it should exit.
     pub async fn run(&mut self) -> Result<()> {
+        // Draw once at start
+        self.ui
+            .notify(ui::Notification::Update)
+            .map_err(Into::into)?;
+
+        let redraw_min_time = Duration::from_millis(500);
+
         while !self.exit.load(Ordering::Relaxed) {
             let event_result = futures::select! {
                 result = self.ui.get_event().fuse() => result.map(Some).map_err(Into::into),
-                _ = self.agent_update.notified().fuse() => Ok(None)
+                notification = time::timeout(redraw_min_time, self.ui_notifications.recv()).fuse() => {
+                    if let Ok(Some(notification)) = notification {
+                        self.ui.notify(notification).map_err(Into::into)?;
+                    } else {
+                        self.ui.notify(ui::Notification::Update).map_err(Into::into)?;
+                    }
+                    Ok(None)
+                }
             };
 
             if let Some(event) = event_result? {
                 match event {
                     ui::Event::Exit => self.exit.store(true, Ordering::Relaxed),
                     ui::Event::Input(message) => {
+                        self.ui
+                            .notify(ui::Notification::PromptQueued(message.clone()))
+                            .map_err(Into::into)?;
                         let _ = self.user_message_submit.send(message);
                     }
                 }
