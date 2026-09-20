@@ -1,6 +1,7 @@
 //! Tools to manage contextual knowledge
 
 use anyhow::{Result, anyhow};
+use helpers::TruncatedDisplay;
 use llimorse::{Agent, CallableTool, ChatListener};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -117,11 +118,7 @@ impl fmt::Display for KnowledgeUpsertParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "key={}", self.keyword)?;
         if let Some(content) = &self.content {
-            if content.len() <= 50 {
-                write!(f, " content={content:?}")?;
-            } else {
-                write!(f, " content=\"{content:.49}…\"")?;
-            }
+            write!(f, " content={:?}", content.truncated_display(100))?;
         }
         if let Some(aliases) = &self.add_aliases {
             write!(f, " add_aliases={aliases:?}")?;
@@ -276,11 +273,7 @@ impl fmt::Display for KnowledgeQueryResult {
             write!(f, "key={key}")?;
         }
         if let Some(content) = &self.content {
-            if content.len() <= 50 {
-                write!(f, " content={content:?}")?;
-            } else {
-                write!(f, " content=\"{content:.49}…\"")?;
-            }
+            write!(f, " content={:?}", content.truncated_display(100))?;
         }
         Ok(())
     }

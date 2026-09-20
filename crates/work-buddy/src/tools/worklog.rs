@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate};
+use helpers::TruncatedDisplay;
 use llimorse::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -210,11 +211,7 @@ impl fmt::Display for WorklogSettableEntry {
         if !self.tags.is_empty() {
             write!(f, "tags={:?} ", self.tags)?;
         }
-        if self.narrative.len() <= 50 {
-            write!(f, "narrative=\"{}\"", self.narrative)?;
-        } else {
-            write!(f, "narrative=\"{:.49}…\"", self.narrative)?;
-        }
+        write!(f, "narrative={:?}", self.narrative.truncated_display(100))?;
 
         Ok(())
     }

@@ -1,6 +1,7 @@
 //! A tool to just write out markdown files
 
 use anyhow::{Result, anyhow};
+use helpers::TruncatedDisplay;
 use llimorse::CallableTool;
 use std::io::Write;
 use std::path::PathBuf;
@@ -41,12 +42,12 @@ llimorse::tool! {
 
 impl fmt::Display for WriteMarkdownParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "filename={} ", self.filename.display())?;
-        if self.content.len() <= 50 {
-            write!(f, "content={:?}", self.content)?;
-        } else {
-            write!(f, "content=\"{:.49}…\"", self.content)?;
-        }
+        write!(
+            f,
+            "filename={} content={:?}",
+            self.filename.display(),
+            self.content.truncated_display(100)
+        )?;
         Ok(())
     }
 }

@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow};
 use chrono::Local;
 use chrono::format::SecondsFormat;
+use helpers::TruncatedDisplay;
 use llimorse::{Agent, CallableTool, ChatListener};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -209,12 +210,7 @@ impl fmt::Display for TaskSettable {
             let len = map.len();
             for (i, (key, value)) in map.iter().enumerate() {
                 let separator = if i == len - 1 { "" } else { ", " };
-
-                if value.len() <= 50 {
-                    write!(f, "{key}={value:?}{separator}")?;
-                } else {
-                    write!(f, "{key}=\"{value:.49}…\"{separator}")?;
-                }
+                write!(f, "{key}={:?}{separator}", value.truncated_display(100))?;
             }
             write!(f, "]")?;
         }
@@ -416,11 +412,7 @@ impl fmt::Display for TaskUpdateParams {
                 for (i, (key, value)) in map.iter().enumerate() {
                     let separator = if i == len - 1 { "" } else { ", " };
                     if let Some(value) = value {
-                        if value.len() <= 50 {
-                            write!(f, "{key}={value:?}{separator}")?;
-                        } else {
-                            write!(f, "{key}=\"{value:.49}…\"{separator}")?;
-                        }
+                        write!(f, "{key}={:?}{separator}", value.truncated_display(100))?;
                     } else {
                         write!(f, "{key}=nil{separator}")?;
                     }
