@@ -362,8 +362,8 @@ fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
     match het {
         HistoryEntryType::Empty => (Style::default(), Alignment::Left),
         HistoryEntryType::User => (Style::default().bold().magenta(), Alignment::Right),
-        HistoryEntryType::Content => (Style::default().bold(), Alignment::Left),
-        HistoryEntryType::Reasoning => (Style::default().italic(), Alignment::Left),
+        HistoryEntryType::Content => (Style::default().white(), Alignment::Left),
+        HistoryEntryType::Reasoning => (Style::default().gray(), Alignment::Left),
         HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
         HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
         HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
