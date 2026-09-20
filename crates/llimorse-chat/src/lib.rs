@@ -48,7 +48,7 @@ impl<I: UiState> App<I> {
         history: &[ChatMessage],
         create_ui: F,
     ) -> Result<Self> {
-        let mut chat_history = ChatHistory::default();
+        let mut chat_history = ChatHistory::for_agent(&agent);
         for message in history {
             chat_history.push_raw(&agent, message);
         }

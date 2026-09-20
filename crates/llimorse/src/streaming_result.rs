@@ -1,5 +1,6 @@
 //! Helper object to manage streaming result
 
+use super::client::TokenUsage;
 use super::line_format::{AssistantMessage, CustomCall, FunctionCall, ToolCall, ToolCallParams};
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::Stream;
@@ -9,6 +10,8 @@ use serde::Deserialize;
 use std::collections::VecDeque;
 use std::mem;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 /// Streamable result for a chat completion request
@@ -31,7 +34,7 @@ pub struct StreamingResult<S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     full_message: Option<AssistantMessage>,
 
     /// Token usage for the whole request
-    token_usage: Option<TokenUsage>,
+    token_usage: Arc<TokenUsage>,
 }
 
 /// In-construction message from the assistant to the user or system
@@ -120,16 +123,6 @@ pub enum StreamingChunk {
     Reasoning(String),
 }
 
-/// Token counts from a completed chat request
-#[derive(Clone, Debug, Default)]
-pub struct TokenUsage {
-    /// Tokens in the prompt
-    pub prompt_tokens: u32,
-
-    /// New tokens produced
-    pub completion_tokens: u32,
-}
-
 /// SSE stream chunk shapes (OpenAI delta format)
 #[derive(Clone, Debug, Deserialize)]
 struct StreamChunk {
@@ -163,6 +156,18 @@ struct StreamChoice {
 }
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
+    /// Read and parse the given input stream.
+    pub fn from_stream(stream: S, token_usage: &Arc<TokenUsage>) -> Self {
+        StreamingResult {
+            stream: stream.into(),
+            chunks: VecDeque::new(),
+            done: false,
+            constructing: Default::default(),
+            full_message: None,
+            token_usage: Arc::clone(token_usage),
+        }
+    }
+
     /// Return the full message after streaming is done.
     ///
     /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
@@ -171,16 +176,6 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
     /// `.take()`s the full message, so will return it only once.
     pub(crate) fn full_message_pinned(self: Pin<&mut Self>) -> Option<AssistantMessage> {
         self.project().full_message.take()
-    }
-
-    /// Return the token usage after streaming is done, if sent by the server.
-    ///
-    /// Will only return `Some(_)` once streaming is done ([`Self::is_terminated()`] returns true)
-    /// and only if there was no error.
-    ///
-    /// `.take()`s the token count, so will return it only once.
-    pub(crate) fn token_usage_pinned(self: Pin<&mut Self>) -> Option<TokenUsage> {
-        self.project().token_usage.take()
     }
 }
 
@@ -255,13 +250,20 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     /// - [`StreamingResult::token_usage`] (if in the input)
     fn apply_chunk(&mut self, chunk: StreamChunk) -> Result<()> {
         for choice in chunk.choices {
+            self.token_usage
+                .streamed_tokens
+                .fetch_add(1, Ordering::Relaxed);
             self.choice_received(choice)?;
         }
 
         if let Some(u) = chunk.usage {
-            let usage = self.token_usage.get_or_insert_default();
-            usage.prompt_tokens = u.prompt_tokens;
-            usage.completion_tokens = u.completion_tokens;
+            self.token_usage
+                .prompt_tokens
+                .store(u.prompt_tokens as usize, Ordering::Relaxed);
+            self.token_usage
+                .completion_tokens
+                .store(u.completion_tokens as usize, Ordering::Relaxed);
+            self.token_usage.streamed_tokens.store(0, Ordering::Relaxed);
         }
 
         Ok(())
@@ -286,20 +288,6 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     fn terminate(&mut self) {
         self.stream.as_mut().project().terminate();
         mem::take(self.chunks);
-    }
-}
-
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> From<S> for StreamingResult<S> {
-    /// Read and parse the given input stream.
-    fn from(stream: S) -> Self {
-        StreamingResult {
-            stream: stream.into(),
-            chunks: VecDeque::new(),
-            done: false,
-            constructing: Default::default(),
-            full_message: None,
-            token_usage: None,
-        }
     }
 }
 

@@ -1,11 +1,11 @@
 //! Agent harness around an LLM client.
 
-use super::client::Client;
+use super::client::{Client, TokenUsage};
 use super::line_format::{
     AssistantMessage, ChatMessage, FunctionDefinition, SystemMessage, ToolCall, ToolCallParams,
     ToolChoiceMode, ToolDefinition, ToolResult, UserMessage,
 };
-use super::streaming_result::{StreamingChunk, StreamingResult, TokenUsage};
+use super::streaming_result::{StreamingChunk, StreamingResult};
 use anyhow::{Result, anyhow, bail};
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
@@ -14,6 +14,7 @@ use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{fmt, mem};
 
@@ -28,9 +29,6 @@ pub struct Agent<L: ChatListener = ()> {
 
     /// Pending tool calls the LLM is waiting for
     pending_calls: Vec<ToolCall>,
-
-    /// Current token usage
-    token_usage: TokenUsage,
 
     /// Available tools
     tools: HashMap<String, Box<dyn Tool>>,
@@ -181,7 +179,6 @@ impl<L: ChatListener> Agent<L> {
             client,
             history: ChatHistory::with_listener(listener),
             pending_calls: Vec::new(),
-            token_usage: Default::default(),
             tools: HashMap::new(),
             tool_definitions: Vec::new(),
         }
@@ -338,12 +335,9 @@ impl<L: ChatListener> Agent<L> {
         }
     }
 
-    /// Return the token usage from the last request: Prompt tokens, and completion tokens.
-    pub fn token_usage(&self) -> (usize, usize) {
-        (
-            self.token_usage.prompt_tokens as usize,
-            self.token_usage.completion_tokens as usize,
-        )
+    /// Return the token usage stat object
+    pub fn token_usage(&self) -> &Arc<TokenUsage> {
+        self.client.token_usage()
     }
 
     /// Return the name of the model in use
@@ -386,6 +380,11 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     /// Await the full response instead of a stream of parts.
     pub fn full_response(self) -> AgentResponse<'a, S, L> {
         AgentResponse { stream: self }
+    }
+
+    /// Return the agent for this in-progress request
+    pub fn agent(&self) -> &Agent<L> {
+        self.agent
     }
 }
 
@@ -435,10 +434,6 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Stream
                 // but some do, so... keep it.
 
                 this.agent.push(message);
-
-                if let Some(token_usage) = this.streaming.token_usage_pinned() {
-                    this.agent.token_usage = token_usage;
-                }
 
                 Poll::Ready(None)
             }

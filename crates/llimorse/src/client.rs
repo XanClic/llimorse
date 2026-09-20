@@ -7,6 +7,8 @@ use super::line_format::{
 use super::streaming_result::StreamingResult;
 use anyhow::{Result, anyhow, bail};
 use futures::Stream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time;
 use tracing::{debug, warn};
 
@@ -24,6 +26,22 @@ pub struct Client {
 
     /// Context size in tokens
     context_size: Option<u64>,
+
+    /// Token usage (how much of the context is used)
+    token_usage: Arc<TokenUsage>,
+}
+
+/// Token counts from a completed chat request
+#[derive(Debug, Default)]
+pub struct TokenUsage {
+    /// Tokens in the prompt
+    pub prompt_tokens: AtomicUsize,
+
+    /// New tokens produced
+    pub completion_tokens: AtomicUsize,
+
+    /// Tokens being streamed
+    pub streamed_tokens: AtomicUsize,
 }
 
 impl Client {
@@ -97,6 +115,7 @@ impl Client {
             url: format!("{base_url}/v1/chat/completions"),
             model: model.id.clone(),
             context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
+            token_usage: Default::default(),
         })
     }
 
@@ -124,7 +143,10 @@ impl Client {
 
         let response = self.submit_request(request, 3).await?;
 
-        Ok(response.bytes_stream().into())
+        Ok(StreamingResult::from_stream(
+            response.bytes_stream(),
+            &self.token_usage,
+        ))
     }
 
     /// Request completion of the given `request` from the LLM.
@@ -182,6 +204,11 @@ impl Client {
         Ok(response)
     }
 
+    /// Return the token usage stat object
+    pub fn token_usage(&self) -> &Arc<TokenUsage> {
+        &self.token_usage
+    }
+
     /// Return the name of the model in use
     pub fn model_name(&self) -> &str {
         &self.model
@@ -190,5 +217,14 @@ impl Client {
     /// Return the number of tokens that fit into the context
     pub fn context_size(&self) -> Option<u64> {
         self.context_size
+    }
+}
+
+impl TokenUsage {
+    /// The full sum of all tokens in the context
+    pub fn sum(&self) -> usize {
+        self.prompt_tokens.load(Ordering::Relaxed)
+            + self.completion_tokens.load(Ordering::Relaxed)
+            + self.streamed_tokens.load(Ordering::Relaxed)
     }
 }

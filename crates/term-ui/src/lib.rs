@@ -65,7 +65,11 @@ impl TermUi {
 
         let mut input_area: ratatui_textarea::TextArea<'static> = Default::default();
         input_area.set_cursor_line_style(Default::default());
-        input_area.set_block(Block::bordered().title("Input"));
+        input_area.set_block(
+            Block::bordered()
+                .title(" Input ")
+                .title_style(Style::default().bold()),
+        );
         input_area.set_wrap_mode(ratatui_textarea::WrapMode::Word);
 
         TermUi {
@@ -240,23 +244,22 @@ impl TermUi {
             lines: history_lines,
         };
 
+        let tokens = chat_history.token_usage().sum();
         let title = if let Some(context_size) = self.context_size {
             format!(
-                " {}: {:.1}k+{:.1}k / {:.1}k ",
+                " {}: {:.1}k / {:.1}k ",
                 self.model_name,
-                chat_history.token_usage().0 as f32 * 1.0e-3,
-                chat_history.token_usage().1 as f32 * 1.0e-3,
+                tokens as f32 * 1.0e-3,
                 context_size as f32 * 1.0e-3,
             )
         } else {
-            format!(
-                " {}: {:.1}k+{:.1}k ",
-                self.model_name,
-                chat_history.token_usage().0 as f32 * 1.0e-3,
-                chat_history.token_usage().1 as f32 * 1.0e-3,
-            )
+            format!(" {}: {:.1}k ", self.model_name, tokens as f32 * 1.0e-3,)
         };
-        let paragraph = Paragraph::new(paragraph_content).block(Block::bordered().title(title));
+        let paragraph = Paragraph::new(paragraph_content).block(
+            Block::bordered()
+                .title(title)
+                .title_style(Style::new().bold()),
+        );
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         let history_len = chat_history.lines().len();

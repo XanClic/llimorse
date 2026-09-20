@@ -1,11 +1,13 @@
 //! Chat log implementation.
 
 use anyhow::anyhow;
+use llimorse::client::TokenUsage;
 use llimorse::line_format::{
     AssistantMessage, ChatMessage, ToolCallParams, ToolResult, UserMessage,
 };
 use llimorse::{Agent, ChatListener};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Type of a chat history entry (for formatting)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,19 +35,28 @@ pub enum HistoryEntryType {
 }
 
 /// Chat history data
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChatHistory {
     /// Full chat history (split into lines, but not broken by terminal width)
     lines: Vec<(String, HistoryEntryType)>,
 
     /// Token usage as last reported by the LLM
-    token_usage: (usize, usize),
+    token_usage: Arc<TokenUsage>,
 
     /// Not-yet-resolved tool calls (for [`Self::push_raw()`])
     open_tool_calls: HashMap<String, ToolCallParams>,
 }
 
 impl ChatHistory {
+    /// Create a new `ChatHistory` object for the given agent
+    pub fn for_agent(agent: &Agent<impl ChatListener>) -> Self {
+        ChatHistory {
+            lines: Vec::new(),
+            token_usage: Arc::clone(agent.token_usage()),
+            open_tool_calls: HashMap::new(),
+        }
+    }
+
     /// Push and format a raw [`ChatMessage`] into the history.
     pub fn push_raw(&mut self, agent: &Agent<impl ChatListener>, msg: &ChatMessage) {
         match msg {
@@ -123,14 +134,9 @@ impl ChatHistory {
         &self.lines
     }
 
-    /// Return the last-reported token usage.
-    pub fn token_usage(&self) -> &(usize, usize) {
+    /// Return the best-known token usage
+    pub fn token_usage(&self) -> &Arc<TokenUsage> {
         &self.token_usage
-    }
-
-    /// Report the token usage.
-    pub fn set_token_usage(&mut self, token_usage: (usize, usize)) {
-        self.token_usage = token_usage;
     }
 
     /// Append the given string of type `ct` to the history.

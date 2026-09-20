@@ -76,11 +76,6 @@ impl ChatAgent {
 
                 drop(result);
 
-                self.chat_history
-                    .lock()
-                    .unwrap()
-                    .set_token_usage(agent.token_usage());
-
                 let mut pending = agent
                     .execute_pending_calls(
                         |agent, call| {
