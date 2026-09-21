@@ -371,7 +371,8 @@ llimorse::tool! {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         tickets: HashMap<String, Option<String>>,
 
-        /// Information to add to the task (or specify nil to remove a keyword)
+        /// Information to add to the task (or specify nil to remove a keyword). Fields not
+        /// specfied will remain unchanged.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         description: HashMap<String, Option<String>>,
     }
