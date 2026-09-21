@@ -145,6 +145,10 @@ struct TaskSettable {
     #[serde(default)]
     priority: TaskPriority,
 
+    /// What components were touched, i.e. which projects were affected
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<String>,
+
     /// Ticket URLs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     tickets: HashMap<String, String>,
@@ -203,7 +207,11 @@ impl fmt::Display for Task {
 
 impl fmt::Display for TaskSettable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "status={:?} prio={:?}", self.status, self.priority)?;
+        write!(
+            f,
+            "status={:?} prio={:?} components={:?}",
+            self.status, self.priority, self.components
+        )?;
 
         for (map, title) in [(&self.tickets, "tickets"), (&self.description, "desc")] {
             write!(f, " {title}=[")?;
@@ -363,6 +371,10 @@ llimorse::tool! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<TaskStatus>,
 
+        /// New task components list, fully replacing the existing one
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        components: Vec<String>,
+
         /// New task priority; default is no change
         #[serde(default, skip_serializing_if = "Option::is_none")]
         priority: Option<TaskPriority>,
@@ -406,6 +418,7 @@ impl fmt::Display for TaskUpdateParams {
         if let Some(priority) = self.priority {
             write!(f, " prio={priority:?}")?;
         }
+        write!(f, " components={:?}", self.components)?;
         for (map, title) in [(&self.tickets, "tickets"), (&self.description, "desc")] {
             let len = map.len();
             if len > 0 {
@@ -454,6 +467,8 @@ impl CallableTool for TaskUpdate {
         if let Some(priority) = params.priority {
             task.settable.priority = priority;
         }
+        task.settable.components = params.components;
+
         for (state, amendment) in [
             (&mut task.settable.tickets, params.tickets),
             (&mut task.settable.description, params.description),
@@ -496,6 +511,10 @@ llimorse::tool! {
         /// List only tasks with at least this priority
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_priority: Option<TaskPriority>,
+
+        /// List only tasks with any of these components
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        components: Option<Vec<String>>,
     }
 
     /// Tasks on the task list, as requested.
@@ -528,6 +547,10 @@ impl fmt::Display for TaskQueryParams {
 
         if let Some(min_priority) = &self.min_priority {
             display.push(format!("priority >= {min_priority:?}"));
+        }
+
+        if let Some(components) = &self.components {
+            display.push(format!("component in {components:?}"));
         }
 
         write!(f, "{}", display.join("; "))
@@ -578,6 +601,16 @@ impl CallableTool for TaskQuery {
 
                 if let Some(min_priority) = &params.min_priority
                     && task.settable.priority < *min_priority
+                {
+                    return false;
+                }
+
+                if let Some(components) = &params.components
+                    && !task
+                        .settable
+                        .components
+                        .iter()
+                        .any(|c| components.contains(c))
                 {
                     return false;
                 }
