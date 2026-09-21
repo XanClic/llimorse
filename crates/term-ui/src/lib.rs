@@ -124,16 +124,19 @@ impl TermUi {
     fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<ui::Event>> {
         if event.kind == ct::KeyEventKind::Press {
             match event.code {
-                ct::KeyCode::Enter if event.modifiers.is_empty() && !self.input_area.is_empty() => {
-                    let message = self.input_area.lines().join("\n");
-                    self.input_area.clear();
-                    return Ok(Some(ui::Event::Input(message)));
-                }
-
-                ct::KeyCode::Enter
-                    if event.modifiers.is_empty() && !self.queued_prompts.is_empty() =>
-                {
-                    return Ok(Some(ui::Event::ForceSubmitQueued));
+                ct::KeyCode::Enter if event.modifiers.is_empty() => {
+                    if !self.input_area.is_empty() {
+                        let message = self.input_area.lines().join("\n");
+                        self.input_area.clear();
+                        return Ok(Some(ui::Event::Input(message)));
+                    } else if !self.queued_prompts.is_empty() {
+                        return Ok(Some(ui::Event::ForceSubmitQueued));
+                    } else {
+                        // Ignore Enter without modifier keys that does not mean a submit (i.e.,
+                        // when the field is empty, do not allow empty to create a newline, instead
+                        // just ignore it)
+                        return Ok(None);
+                    }
                 }
 
                 ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
