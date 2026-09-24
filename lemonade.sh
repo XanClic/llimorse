@@ -8,9 +8,11 @@
 #   lemonade.sh              # lemon --zesty in the container
 #   lemonade.sh <extra args> # forwarded after --zesty
 #   lemonade.sh --system <host file> # push a system prompt file (any
-#                                     # host path) into the container;
-#                                     # with no --system, LEMON.md / AGENTS.md
-#                                     # / CLAUDE.md in the working directory
+#                                     # host path) into the container; may be
+#                                     # repeated — the files are concatenated
+#                                     # in the order given —; with no
+#                                     # --system, LEMON.md / AGENTS.md /
+#                                     # CLAUDE.md in the working directory
 #                                     # are pushed in automatically
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
@@ -102,6 +104,9 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # container (unlike its other path flags it is not a container path), so
 # lemonade.sh intercepts it and bind-mounts the host file — any path, in
 # the repo or not — at /system-prompt.md, forwarding the container path.
+# Repeated --system files are concatenated on the host (order preserved,
+# one blank line between them) into a temp file that is mounted instead,
+# so lemon still only ever sees the single /system-prompt.md.
 # With no --system given, LEMON.md / AGENTS.md / CLAUDE.md in the working
 # directory (where lemonade.sh was invoked, any subdirectory) is detected later
 # and pushed in; an explicit --system always wins.
@@ -115,7 +120,8 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # worktree holds work this checkout lacks. The worktree is started as-is:
 # nothing is wiped or re-cloned (a re-clone would destroy the work), and
 # the post-session reminder still reports it.
-SYSFILE=""
+SYSFILES=()
+SYSFILE_TEMP=""
 FORCE_FRESH=""
 IGNORE_DIVERGENCE=""
 NEW_ARGS=()
@@ -123,13 +129,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --system)
             [ $# -ge 2 ] || { err "--system needs a value"; exit 1; }
-            SYSFILE="$2"; shift 2
-            NEW_ARGS+=(--system /system-prompt.md)
+            SYSFILES+=("$2"); shift 2
             ;;
         --system=*)
-            SYSFILE="${1#--system=}"
-            NEW_ARGS+=(--system /system-prompt.md)
-            shift
+            SYSFILES+=("${1#--system=}"); shift
             ;;
         --force-fresh)
             FORCE_FRESH=1
@@ -164,25 +167,46 @@ LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
 # is fine: the -x check above guarantees the file exists.)
 LEMON_BIN=$(realpath "$LEMON_BIN")
 
-# System prompt file: resolved here, before any pulling or building, so a
-# mistyped --system fails at once. With no --system, AGENTS.md / CLAUDE.md
-# in the working directory is picked up. Canonicalized to absolute: podman
-# treats a -v source without a leading '/' as a named volume (same trap as
-# LEMON_BIN above). Mounted at /system-prompt.md further down.
-if [ -n "$SYSFILE" ]; then
-    [ -f "$SYSFILE" ] || { err "System prompt file not found: $SYSFILE"; exit 1; }
+# System prompt file(s): resolved here, before any pulling or building, so
+# a mistyped --system fails at once. With no --system, LEMON.md / AGENTS.md
+# / CLAUDE.md in the working directory is picked up. Several --system files
+# are concatenated (order preserved, one blank line between them) into a
+# temp file that is mounted; a single one is mounted as-is. Canonicalized
+# to absolute: podman treats a -v source without a leading '/' as a named
+# volume (same trap as LEMON_BIN above). Mounted at /system-prompt.md
+# further down.
+SYSFILE=""
+if [ ${#SYSFILES[@]} -gt 0 ]; then
+    for f in "${SYSFILES[@]}"; do
+        [ -f "$f" ] || { err "System prompt file not found: $f"; exit 1; }
+    done
+    if [ ${#SYSFILES[@]} -eq 1 ]; then
+        SYSFILE=$(realpath "${SYSFILES[0]}")
+    else
+        SYSFILE=$(mktemp "${TMPDIR:-/tmp}/lemon-system-prompt.XXXXXX")
+        SYSFILE_TEMP="$SYSFILE"
+        # The cleanup trap further down also removes this; the early trap
+        # covers the window before it is installed (a pull or build failure).
+        trap 'rm -f "$SYSFILE_TEMP"' EXIT
+        first=1
+        for f in "${SYSFILES[@]}"; do
+            if [ "$first" -eq 1 ]; then first=0; else printf '\n\n' >> "$SYSFILE"; fi
+            # $() strips trailing newlines and printf puts exactly one back,
+            # so the blank-line join holds even for files without a final
+            # newline.
+            printf '%s\n' "$(cat -- "$f")" >> "$SYSFILE"
+        done
+    fi
+    set -- "$@" --system /system-prompt.md
 else
     for cand in LEMON.md AGENTS.md CLAUDE.md; do
         if [ -f "$cand" ]; then
-            SYSFILE="$cand"
-            note "Using $SYSFILE in the working directory as the system prompt"
+            SYSFILE=$(realpath "$cand")
+            note "Using $cand in the working directory as the system prompt"
             set -- "$@" --system /system-prompt.md
             break
         fi
     done
-fi
-if [ -n "$SYSFILE" ]; then
-    SYSFILE=$(realpath "$SYSFILE")
 fi
 
 # Divergence check: compare this checkout with the worktree and set the
@@ -484,6 +508,7 @@ cleanup() {
     podman rm -f "$SEARXNG" >/dev/null 2>&1 || true
     podman network rm "$NET" >/dev/null 2>&1 || true
     rm -f "$SEARXNG_SETTINGS"
+    rm -f "$SYSFILE_TEMP"
 }
 trap cleanup EXIT
 

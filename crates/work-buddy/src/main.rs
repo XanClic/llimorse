@@ -41,9 +41,13 @@ derive_merge! {
         #[arg(long)]
         searxng_url: Option<String>,
 
-        /// Path to a file containing the system prompt
+        /// Path to a file containing the system prompt. May be repeated; the
+        /// files are concatenated in the order given, separated by a blank line.
+        /// In a config file, `system` may be a single path (legacy) or a list
+        /// of paths.
         #[arg(long)]
-        system: Option<PathBuf>,
+        #[serde(deserialize_with = "helpers::system_files::deserialize")]
+        system: Vec<PathBuf>,
 
         /// Enable debug-level logging
         #[arg(long)]
@@ -138,7 +142,23 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let system_prompt = args.system.map(fs::read_to_string).transpose()?;
+    let system_prompt: Option<String> = if args.system.is_empty() {
+        None
+    } else {
+        // One message for all files: not every chat template handles multiple
+        // system messages well, and a single one at the top of the history is
+        // the safe shape.
+        let mut prompt = String::new();
+        for file in &args.system {
+            let content =
+                fs::read_to_string(file).with_context(|| format!("{}", file.display()))?;
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(content.trim_end_matches(['\n', '\r']));
+        }
+        Some(prompt)
+    };
 
     // Use the CLI's `--resume` if provided, otherwise default to Fresh.
     let resume = args.resume.unwrap_or(Resume::Fresh);

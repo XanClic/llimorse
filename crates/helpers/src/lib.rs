@@ -4,6 +4,7 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 pub mod macros;
+pub mod system_files;
 pub mod truncated_display;
 
 pub use macros::Mergeable;

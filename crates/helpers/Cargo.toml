@@ -2,3 +2,6 @@
 name = "helpers"
 version.workspace = true
 edition = "2024"
+
+[dependencies]
+serde.workspace = true

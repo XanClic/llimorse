@@ -18,6 +18,7 @@ subdirectory; the worktree is keyed on the top-level path):
     ./lemonade.sh                 # lemon --zesty
     ./lemonade.sh <extra args>    # forwarded after --zesty
     ./lemonade.sh --system <host file> # push a system prompt in
+                                       # (repeatable: files concatenated in order)
     ./lemonade.sh --resume /sessions/<file> # continue a previous session
     ./lemonade.sh --force-fresh       # wipe the worktree (session logs
                                        # kept) and re-clone the checkout
@@ -242,6 +243,13 @@ bind-mounts the host file — any path, in the repo or not — read-only at
 `/system-prompt.md`, and forwards the container path instead. The
 `realpath` canonicalization is the same trap as the lemon binary: a
 relative `-v` source is a named volume to podman.
+
+The flag may be repeated: the files are concatenated on the host —
+order preserved, one blank line between them, each file's trailing
+newlines normalized to one — into a temp file that is mounted instead,
+so lemon still only ever sees the single `/system-prompt.md`. The temp
+file dies with the session (the EXIT trap removes it); a single
+`--system` file is mounted directly, no temp file.
 
 With no `--system` given, `AGENTS.md` / `CLAUDE.md` in the working
 directory — where lemonade was invoked, any subdirectory, deliberately

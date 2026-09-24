@@ -33,6 +33,23 @@ impl Mergeable for bool {
     }
 }
 
+impl<T> Mergeable for Vec<T> {
+    /// Append `other` to `self`, in this order.
+    ///
+    /// Ordering is influenced by the local desire to have prompts with higher precedence later.
+    fn merge(&mut self, mut other: Self) {
+        self.append(&mut other);
+    }
+
+    /// Append `self` to `other`, in this order, putting the result into `self`.
+    ///
+    /// Ordering is influenced by the local desire to have prompts with higher precedence later.
+    fn merge_weak(&mut self, mut other: Self) {
+        other.append(self);
+        *self = other;
+    }
+}
+
 /// Derive the `Mergeable` trait for structs composed entirely of `Mergeable` fields.
 #[macro_export]
 macro_rules! derive_merge {
