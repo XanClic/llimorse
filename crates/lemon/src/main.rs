@@ -251,6 +251,7 @@ async fn main() -> Result<()> {
             searxng_url: args.searxng_url.clone(),
         },
         llimorse_chat::SubagentNotifier::new(&ui_notifications),
+        None,
     );
     agent.add_tool(subagent);
 

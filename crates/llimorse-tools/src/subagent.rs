@@ -5,6 +5,8 @@ use futures::StreamExt;
 use llimorse::line_format::{ChatMessage, ToolCall};
 use llimorse::{Agent, CallableTool, StreamingChunk};
 use std::fmt;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 /// Factory for creating the tool set that subagents receive.
 pub trait ToolFactory: fmt::Debug + Send + Sync {
@@ -79,6 +81,9 @@ llimorse::tool! {
 
         /// Notify e.g. a UI of changes in subagents
         notifier: N,
+
+        /// Limits the number of subagents that may run in parallel; `None` means unlimited.
+        concurrency: Option<Arc<Semaphore>>,
     }
 }
 
@@ -90,6 +95,7 @@ impl<F: ToolFactory, N: SubagentNotifier> Subagent<F, N> {
         model_name: &str,
         tool_factory: F,
         notifier: N,
+        max_parallel: Option<usize>,
     ) -> Self {
         Subagent {
             system_prompt: system_prompt.to_string(),
@@ -97,6 +103,7 @@ impl<F: ToolFactory, N: SubagentNotifier> Subagent<F, N> {
             model_name: model_name.to_string(),
             tool_factory,
             notifier,
+            concurrency: max_parallel.map(|limit| Arc::new(Semaphore::new(limit))),
         }
     }
 }
@@ -157,6 +164,19 @@ impl<F: ToolFactory, N: SubagentNotifier> CallableTool for Subagent<F, N> {
             .created(&agent, &params.prompt)
             .await
             .map_err(Into::into)?;
+
+        // The permit is held for the whole run, so at most `max_parallel` subagents run at once;
+        // it is released when the guard is dropped at the end of this function
+        // Registering with the notifier happens before taking the permit, so subagents waiting for
+        // a free slot are already visible to the UI (with their prompt), just not running.
+        let _permit = match &self.concurrency {
+            Some(semaphore) => {
+                Some(semaphore.clone().acquire_owned().await.map_err(|err| {
+                    anyhow!("Failed to acquire subagent concurrency permit: {err}")
+                })?)
+            }
+            None => None,
+        };
 
         loop {
             let mut stream = agent.submit().await?;
