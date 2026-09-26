@@ -284,19 +284,19 @@ impl TermUi {
             .title_bottom(Line::from(" [Ctrl-C to quit] ").right_aligned())
     }
 
-    /// Raise a terminal notification that the response is ready and the agent is awaiting a
-    /// new prompt.
+    /// Send a terminal (OSC 99) notification with the given title and optional body.
     ///
     /// Under tmux (detected via `$TERM`) the OSC 99 messages are wrapped in tmux’s
     /// passthrough envelope (which requires `allow-passthrough on`); otherwise the
     /// messages are sent bare.
-    fn notify_prompt_done(&self, response: Option<String>) {
-        // Without the leading ESC and the ST terminator: the bare path and the tmux
-        // wrapper both supply them.
-        let title_payload = format!("]99;i=1:d=0;{}: Turn done, awaiting prompt", self.app_name);
-        let body_payload = if let Some(response) = response {
-            let sanitized = response
-                .trim()
+    ///
+    /// The title and body are trimmed, and newlines, tabs, semicolons and other ASCII
+    /// control characters are replaced or dropped, since they would corrupt the OSC 99
+    /// payload; both are truncated to 200 characters.
+    fn send_osc99_notification(&self, title: &str, body: Option<&str>) {
+        /// Strip characters that would corrupt an OSC 99 payload.
+        fn sanitize(text: &str) -> String {
+            text.trim()
                 .chars()
                 .filter_map(|c| match c {
                     '\n' | '\t' => Some(' '),
@@ -305,10 +305,24 @@ impl TermUi {
                     c if c.is_ascii_control() => Some('�'),
                     c => Some(c),
                 })
-                .collect::<String>();
-            format!("]99;i=1:d=1:p=body;{}", sanitized.truncated_display(200))
-        } else {
-            String::from("]99;i=1:d=1:p=body;(Awaiting prompt.)")
+                .collect()
+        }
+
+        // Without the leading ESC and the ST terminator: the bare path and the tmux
+        // wrapper both supply them.
+        let title_payload = format!(
+            "]99;i=1:d=0;{}: {}",
+            sanitize(&self.app_name),
+            sanitize(title).truncated_display(200)
+        );
+        let body_payload = match body {
+            Some(body) => {
+                format!(
+                    "]99;i=1:d=1:p=body;{}",
+                    sanitize(body).truncated_display(200)
+                )
+            }
+            None => String::from("]99;i=1:d=1:p=body;(No body)"),
         };
 
         let seq = if env::var("TERM").is_ok_and(|term| term.starts_with("tmux")) {
@@ -324,6 +338,13 @@ impl TermUi {
         };
 
         let _ = crossterm::execute!(io::stdout(), crossterm::style::Print(seq));
+    }
+
+    /// Raise a terminal notification that the response is ready and the agent is awaiting a
+    /// new prompt.
+    fn notify_prompt_done(&self, response: Option<String>) {
+        let body = response.as_deref().unwrap_or("(Awaiting prompt.)");
+        self.send_osc99_notification("Turn done, awaiting prompt", Some(body));
     }
 
     /// Render the current state onto the screen.
@@ -566,6 +587,9 @@ impl ui::UiState for TermUi {
                 self.notify_prompt_done(response);
             }
             ui::Notification::RequestPermission { prompt, approval } => {
+                // Alert the user out of band: the modal popup only reaches them while
+                // they are viewing this agent.
+                self.send_osc99_notification("Tool permission requested", Some(&prompt));
                 self.pending_permissions.push_back((prompt, approval));
             }
             ui::Notification::SubagentCreated {
