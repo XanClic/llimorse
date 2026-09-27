@@ -62,6 +62,16 @@ derive_merge! {
     }
 }
 
+/// Strip a trailing file extension (e.g. `.gguf`) from a model name, so that the name shown to the
+/// LLM does not look like a file path. The full name must be kept for API requests, which need the
+/// exact model id.
+fn display_model_name(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(idx) if name[idx + 1..].chars().all(|c| c.is_ascii_alphanumeric()) => &name[..idx],
+        _ => name,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
@@ -132,10 +142,13 @@ async fn main() -> Result<()> {
     // Push the current time and date
     if resume_history.is_none() {
         let now = Local::now();
+        let model_name = display_model_name(&agent.client_state().model_name);
         agent.push_system(format!(
-            "The current date and time is {}, {}",
+            "The current date and time is {}, {}. Your model name is {2}, and you are running in the lemon harness. \
+             Sign git commits with \"Co-Authored-by: {2} on lemon <lemon@localhost>\".",
             now.weekday(),
-            now.to_rfc3339_opts(SecondsFormat::Secs, false)
+            now.to_rfc3339_opts(SecondsFormat::Secs, false),
+            model_name,
         ));
     }
 
@@ -148,4 +161,32 @@ async fn main() -> Result<()> {
     };
 
     app.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_model_name;
+
+    #[test]
+    fn strips_trailing_extension() {
+        assert_eq!(
+            display_model_name("Qwen3.8-27B-UD-Q4_K_M.gguf"),
+            "Qwen3.8-27B-UD-Q4_K_M"
+        );
+    }
+
+    #[test]
+    fn keeps_dots_inside_the_name() {
+        assert_eq!(display_model_name("Qwen3.8-27B"), "Qwen3.8-27B");
+    }
+
+    #[test]
+    fn no_dot_is_unchanged() {
+        assert_eq!(display_model_name("default"), "default");
+    }
+
+    #[test]
+    fn non_alphanumeric_suffix_is_kept() {
+        assert_eq!(display_model_name("model.v2-beta"), "model.v2-beta");
+    }
 }
