@@ -47,6 +47,12 @@ pub enum Notification {
     /// User message has been submitted to the LLM
     PromptSubmitted,
 
+    /// The current prompt iteration is complete; the agent is now awaiting a new prompt
+    AwaitingPrompt {
+        /// Output of the just-completed prompt iteration (if any)
+        response: Option<String>,
+    },
+
     /// A tool call is requesting permission from the user
     RequestPermission {
         /// The prompt displayed to the user

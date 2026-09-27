@@ -5,6 +5,7 @@ use super::ui;
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use llimorse::StreamingChunk;
+use llimorse::line_format::ChatMessage;
 use std::collections::VecDeque;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -126,7 +127,7 @@ impl ChatAgent {
         while self.process_notifications().await && self.process_available_notifications() {
             self.submit_queued_user_messages(&mut agent);
 
-            loop {
+            let response = loop {
                 let mut streaming = agent.submit().await?;
 
                 loop {
@@ -197,9 +198,25 @@ impl ChatAgent {
                 }
 
                 if !pending {
-                    break;
+                    break agent.history().last().and_then(|cm| {
+                        if let ChatMessage::Assistant(msg) = cm
+                            && let Some(response) = &msg.content
+                            && !response.is_empty()
+                        {
+                            Some(response.clone())
+                        } else {
+                            None
+                        }
+                    });
                 }
-            }
+            };
+
+            // The loop can only exit when there are no pending tool calls and no queued
+            // messages: the prompt iteration is complete, and the agent will wait for the
+            // user’s next prompt.
+            let _ = self
+                .ui_notifications
+                .send(ui::Notification::AwaitingPrompt { response });
         }
 
         Ok(())

@@ -479,6 +479,7 @@ impl ui::UiState for TermUi {
             ui::Notification::PromptSubmitted => {
                 self.queued_prompts.pop_front();
             }
+            ui::Notification::AwaitingPrompt { response: _ } => (), // Representation to be added later
             ui::Notification::RequestPermission { prompt, approval } => {
                 self.pending_permissions.push_back((prompt, approval));
             }
