@@ -2,12 +2,14 @@
 
 pub mod bash;
 pub mod file;
+pub mod subagent;
 pub mod web_search;
 
 pub use bash::Bash;
 pub use file::{Edit, View, Write};
 use std::any::Any;
 use std::fmt::{Debug, Display};
+pub use subagent::{Subagent, ToolFactory};
 pub use web_search::WebSearch;
 
 /// Pseudo-trait for gateable tool parameters
