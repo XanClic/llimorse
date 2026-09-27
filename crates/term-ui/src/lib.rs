@@ -170,6 +170,14 @@ impl TermUi {
 
     /// Handle the given keyboard event.
     fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<ui::Event>> {
+        // Ctrl-C is a hard exit, even while a permission request is on screen.
+        if event.kind == ct::KeyEventKind::Press
+            && event.code == ct::KeyCode::Char('c')
+            && event.modifiers.contains(ct::KeyModifiers::CONTROL)
+        {
+            return Ok(Some(ui::Event::Exit));
+        }
+
         if event.kind == ct::KeyEventKind::Press && !self.pending_permissions.is_empty() {
             // A permission request is on screen: it is modal. Enter approves, Esc denies, all
             // other keys are ignored.
@@ -204,8 +212,6 @@ impl TermUi {
                         return Ok(None);
                     }
                 }
-
-                ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
 
                 ct::KeyCode::PageUp => {
                     if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
