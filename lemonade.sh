@@ -847,7 +847,8 @@ else
     TERMINAL_ENV+=(-e COLORTERM=truecolor)
 fi
 
-podman run --rm -it \
+# Named after this process, like the network, so it can easily be found
+podman run --rm -it --name "lemonade-$$" \
     --network "$NET" \
     "${MOUNTS[@]}" \
     "${TERMINAL_ENV[@]}" \
