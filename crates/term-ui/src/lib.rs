@@ -40,7 +40,7 @@ pub struct TermUi {
     model_name: String,
 
     /// The maximum number of tokens that fit in the context
-    context_size: Option<u64>,
+    context_size: Option<usize>,
 
     /// Produces terminal events, asynchronously
     events: ct::EventStream,

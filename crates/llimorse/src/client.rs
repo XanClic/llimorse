@@ -25,7 +25,7 @@ pub struct Client {
     model: String,
 
     /// Context size in tokens
-    context_size: Option<u64>,
+    context_size: Option<usize>,
 
     /// Token usage (how much of the context is used)
     token_usage: Arc<TokenUsage>,
@@ -215,7 +215,7 @@ impl Client {
     }
 
     /// Return the number of tokens that fit into the context
-    pub fn context_size(&self) -> Option<u64> {
+    pub fn context_size(&self) -> Option<usize> {
         self.context_size
     }
 }

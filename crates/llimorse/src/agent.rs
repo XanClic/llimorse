@@ -346,7 +346,7 @@ impl Agent {
     }
 
     /// Return the number of tokens that fit into the context
-    pub fn context_size(&self) -> Option<u64> {
+    pub fn context_size(&self) -> Option<usize> {
         self.client.context_size()
     }
 }

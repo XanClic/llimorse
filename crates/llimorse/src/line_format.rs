@@ -406,8 +406,8 @@ pub struct Model {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelMeta {
     /// Context size in tokens
-    pub n_ctx: Option<u64>,
+    pub n_ctx: Option<usize>,
 
     /// Context size in tokens from training
-    pub n_ctx_train: Option<u64>,
+    pub n_ctx_train: Option<usize>,
 }
