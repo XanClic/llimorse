@@ -11,9 +11,11 @@
 #                                     # host path) into the container; may be
 #                                     # repeated — the files are concatenated
 #                                     # in the order given —; with no
-#                                     # --system, LEMON.md / AGENTS.md /
-#                                     # CLAUDE.md in the working directory
-#                                     # are pushed in automatically. Before
+#                                     # --system, AGENTS.md / CLAUDE.md in
+#                                     # the working directory is picked up
+#                                     # (the first that exists), and
+#                                     # LEMON.md, if present, is appended
+#                                     # to it — a refinement of it. Before
 #                                     # any of them, a short built-in
 #                                     # description of the container
 #                                     # environment is always passed as a
@@ -149,9 +151,11 @@ printf '      Share:      %s (mounted at /share; host<->container data exchange;
 # Repeated --system files are concatenated on the host (order preserved,
 # one blank line between them) into a temp file that is mounted instead,
 # so lemon still only ever sees the single /system-prompt.md.
-# With no --system given, LEMON.md / AGENTS.md / CLAUDE.md in the working
-# directory (where lemonade.sh was invoked, any subdirectory) is detected later
-# and pushed in; an explicit --system always wins.
+# With no --system given, AGENTS.md / CLAUDE.md in the working directory
+# (where lemonade.sh was invoked, any subdirectory) is picked up — the
+# first that exists — and LEMON.md, if present, is appended to it:
+# LEMON.md is a refinement of the base instructions, so the two are
+# concatenated, base first; an explicit --system always wins.
 #
 # --subagent-system: lemon's flag of the same name for the subagent prompt;
 # intercepted and resolved exactly like --system (mount at
@@ -260,45 +264,54 @@ trap 'rm -f "$ENV_PROMPT"' EXIT
 set -- "$@" --system /system-prompt-env.md
 
 # System prompt file(s): resolved here, before any pulling or building, so
-# a mistyped --system fails at once. With no --system, LEMON.md / AGENTS.md
-# / CLAUDE.md in the working directory is picked up. Several --system files
-# are concatenated (order preserved, one blank line between them) into a
-# temp file that is mounted; a single one is mounted as-is. Canonicalized
-# to absolute: podman treats a -v source without a leading '/' as a named
-# volume (same trap as LEMON_BIN above). Mounted at /system-prompt.md
-# further down.
+# a mistyped --system fails at once. With no --system, AGENTS.md /
+# CLAUDE.md in the working directory is picked up — the first that exists
+# — and LEMON.md, if present, is appended to it: a refinement of the base
+# instructions. Several files are concatenated (order preserved, one blank
+# line between them) into a temp file that is mounted; a single one is
+# mounted as-is. Canonicalized to absolute: podman treats a -v source
+# without a leading '/' as a named volume (same trap as LEMON_BIN above).
+# Mounted at /system-prompt.md further down.
 SYSFILE=""
 if [ ${#SYSFILES[@]} -gt 0 ]; then
     for f in "${SYSFILES[@]}"; do
         [ -f "$f" ] || { err "System prompt file not found: $f"; exit 1; }
     done
-    if [ ${#SYSFILES[@]} -eq 1 ]; then
-        SYSFILE=$(realpath "${SYSFILES[0]}")
-    else
-        SYSFILE=$(mktemp "${TMPDIR:-/tmp}/lemon-system-prompt.XXXXXX")
-        SYSFILE_TEMP="$SYSFILE"
-        # The cleanup trap further down also removes these; the early trap
-        # covers the window before it is installed (a pull or build failure).
-        trap 'rm -f "$ENV_PROMPT" "$SYSFILE_TEMP"' EXIT
-        first=1
-        for f in "${SYSFILES[@]}"; do
-            if [ "$first" -eq 1 ]; then first=0; else printf '\n\n' >> "$SYSFILE"; fi
-            # $() strips trailing newlines and printf puts exactly one back,
-            # so the blank-line join holds even for files without a final
-            # newline.
-            printf '%s\n' "$(cat -- "$f")" >> "$SYSFILE"
-        done
-    fi
-    set -- "$@" --system /system-prompt.md
+    CANDS=("${SYSFILES[@]}")
 else
-    for cand in LEMON.md AGENTS.md CLAUDE.md; do
+    CANDS=()
+    for cand in AGENTS.md CLAUDE.md; do
         if [ -f "$cand" ]; then
-            SYSFILE=$(realpath "$cand")
-            note "Using $cand in the working directory as the system prompt"
-            set -- "$@" --system /system-prompt.md
+            CANDS+=("$cand")
             break
         fi
     done
+    if [ -f LEMON.md ]; then
+        CANDS+=("LEMON.md")
+    fi
+    if [ ${#CANDS[@]} -gt 0 ]; then
+        note "Using ${CANDS[*]// /, } in the working directory as the system prompt"
+    fi
+fi
+if [ ${#CANDS[@]} -eq 1 ]; then
+    SYSFILE=$(realpath "${CANDS[0]}")
+elif [ ${#CANDS[@]} -gt 1 ]; then
+    SYSFILE=$(mktemp "${TMPDIR:-/tmp}/lemon-system-prompt.XXXXXX")
+    SYSFILE_TEMP="$SYSFILE"
+    # The cleanup trap further down also removes these; the early trap
+    # covers the window before it is installed (a pull or build failure).
+    trap 'rm -f "$ENV_PROMPT" "$SYSFILE_TEMP"' EXIT
+    first=1
+    for f in "${CANDS[@]}"; do
+        if [ "$first" -eq 1 ]; then first=0; else printf '\n\n' >> "$SYSFILE"; fi
+        # $() strips trailing newlines and printf puts exactly one back,
+        # so the blank-line join holds even for files without a final
+        # newline.
+        printf '%s\n' "$(cat -- "$f")" >> "$SYSFILE"
+    done
+fi
+if [ -n "$SYSFILE" ]; then
+    set -- "$@" --system /system-prompt.md
 fi
 
 # Subagent system prompt file(s): lemon's --subagent-system takes a path

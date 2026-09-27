@@ -325,13 +325,15 @@ so lemon still only ever sees the single `/system-prompt.md`. The temp
 file dies with the session (the EXIT trap removes it); a single
 `--system` file is mounted directly, no temp file.
 
-With no `--system` given, `LEMON.md` / `AGENTS.md` / `CLAUDE.md` in the
-working directory — where lemonade was invoked, any subdirectory,
-deliberately not the top-level — is detected and pushed in, in that
-order: these are where per-project agent instructions already
-conventionally live, so the common case needs no flag. An explicit
-`--system` always wins, and a missing file is a clear error before
-anything is pulled or built.
+With no `--system` given, `AGENTS.md` / `CLAUDE.md` in the working
+directory — where lemonade was invoked, any subdirectory, deliberately
+not the top-level — is detected and pushed in, the first that exists:
+these are where per-project agent instructions already conventionally
+live, so the common case needs no flag. `LEMON.md`, if present, is
+appended to it — it is a refinement of the base instructions, so the
+two are concatenated, base first, into the single `/system-prompt.md`.
+An explicit `--system` always wins, and a missing file is a clear error
+before anything is pulled or built.
 
 A first `--system` file is pushed in unconditionally, before whatever the
 above chose (or alone, when nothing was chosen): a short description of
