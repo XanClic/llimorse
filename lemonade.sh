@@ -29,6 +29,12 @@
 #                                     # automatically, and with no such
 #                                     # file lemon's built-in subagent
 #                                     # prompt is used
+# If the host has a ~/.lemonade.toml, it is mounted into the container
+# at /lemonade.toml and passed to lemon with --config, where it supplies
+# base values for lemon's arguments (the command line, including
+# everything lemonade appends, still wins). An explicit --config in the
+# arguments wins over the file: it names a container path lemonade
+# cannot resolve, and lemon refuses the flag twice
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
@@ -333,6 +339,29 @@ else
         note "Using LEMON.SUBAGENT.md in the working directory as the subagent system prompt"
         set -- "$@" --subagent-system /subagent-system-prompt.md
     fi
+fi
+
+# Config file: if the host has a ~/.lemonade.toml, mount it into the
+# container at /lemonade.toml and hand it to lemon with --config, where
+# it supplies base values for lemon's arguments (the command line —
+# including everything lemonade appends — still wins; lemon merges the
+# config under the flags). Lemon's --config, like --system, takes a path
+# that must exist inside the container, so the host file is mounted
+# rather than passed by its host path. An explicit --config in the
+# arguments wins: it names a container path lemonade cannot resolve, and
+# lemon refuses the flag twice.
+CONFIG_FILE=""
+if [ -n "${HOME:-}" ] && [ -f "$HOME/.lemonade.toml" ]; then
+    case " $* " in
+        *" --config "* | *" --config="*)
+            note "Not using ~/.lemonade.toml: a --config was already given"
+            ;;
+        *)
+            CONFIG_FILE=$(realpath "$HOME/.lemonade.toml")
+            set -- "$@" --config /lemonade.toml
+            note "Mounting the host's lemonade config $CONFIG_FILE into the container at /lemonade.toml (--config)"
+            ;;
+    esac
 fi
 
 # Divergence check: compare this checkout with the worktree and set the
@@ -820,6 +849,9 @@ if [ -n "$SYSFILE" ]; then
 fi
 if [ -n "$SUBAGENT_SYSFILE" ]; then
     MOUNTS+=(-v "$SUBAGENT_SYSFILE:/subagent-system-prompt.md:ro,z")
+fi
+if [ -n "$CONFIG_FILE" ]; then
+    MOUNTS+=(-v "$CONFIG_FILE:/lemonade.toml:ro,z")
 fi
 
 # Session logs: lemon appends the current session to /sessions (mounted

@@ -74,12 +74,14 @@ Steps:
    export handover directory at `/xfer`, the per-checkout session-log
    directory at `/sessions`, the shared directory at `/share`, and the
    lemon binary bind-mounted — plus the built-in environment description
-   at `/system-prompt-env.md`, always, and the chosen system prompt file
-   at `/system-prompt.md` when one is chosen (see System prompt below) —
-   running `lemon --zesty --llama-url
+   at `/system-prompt-env.md`, always, the chosen system prompt file at
+   `/system-prompt.md` when one is chosen (see System prompt below), and
+   the host's `~/.lemonade.toml` at `/lemonade.toml` when present (see
+   Config file below) — running `lemon --zesty --llama-url
    http://<LLAMA_HOST>:8080 --searxng-url http://lemonade-searxng-<pid>:8080
-   [--session-logs /sessions] "$@"`. The script appends `--session-logs
-   /sessions` unless the caller already passes one, and prints the resume
+   [--config /lemonade.toml] [--session-logs /sessions] "$@"`. The script
+   appends `--session-logs /sessions` unless the caller already passes
+   one, and prints the resume
    command for the newest log when lemon exits (see Session logs and
    resume below).
 
@@ -351,6 +353,23 @@ directory — where lemonade was invoked, any subdirectory, deliberately not
 the top-level — is pushed in automatically if present; with no such file,
 lemon's built-in subagent prompt is used. An explicit `--subagent-system`
 always wins, and giving the flag replaces the built-in prompt wholesale.
+
+## Config file
+
+If the host has a `~/.lemonade.toml`, it is mounted read-only at
+`/lemonade.toml` and passed to lemon with `--config`, where it supplies
+base values for all of lemon's arguments: lemon merges the config under
+the command line, so every flag on the line — including the ones
+lemonade appends — wins. This is how per-user lemon settings (model,
+UI look, subagent limits, ...) reach the container without living in
+the repo or in the arguments.
+
+Lemon's `--config`, like `--system`, takes a path that must exist
+inside the container, so the host file is mounted rather than passed by
+its host path, and is canonicalized with `realpath` (the same
+named-volume trap as the lemon binary). An explicit `--config` in the
+arguments wins over the file: it names a container path lemonade cannot
+resolve, and lemon refuses the flag twice.
 
 ## The lemon binary
 
