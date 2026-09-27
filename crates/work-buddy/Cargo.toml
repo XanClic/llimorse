@@ -5,12 +5,12 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
-chrono = "0.4"
+chrono.workspace = true
 clap.workspace = true
 fastrand = "2"
 helpers.workspace = true
 llimorse.workspace = true
-llimorse-chat.workspace = true
+llimorse-chat = { workspace = true, features = ["clap"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

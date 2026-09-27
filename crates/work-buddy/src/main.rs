@@ -10,7 +10,7 @@ use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use helpers::{Mergeable, derive_merge};
-use llimorse_chat::log::SessionLog;
+use llimorse_chat::log::{Resume, SessionManager};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,9 +75,11 @@ derive_merge! {
         #[arg(long)]
         session_logs: Option<PathBuf>,
 
-        /// Raw session log to resume from
-        #[arg(long)]
-        resume: Option<PathBuf>,
+        /// Raw session log to resume from. With no value, resumes the newest session log in
+        /// `--session-logs`
+        #[arg(long, num_args(0..=1), default_missing_value = "", value_parser = Resume::value_parser())]
+        #[serde(skip)] // no sense allowing this in a config file
+        resume: Option<Resume>,
     }
 }
 
@@ -138,28 +140,16 @@ async fn main() -> Result<()> {
 
     let system_prompt = args.system.map(fs::read_to_string).transpose()?;
 
-    let session_log_file = if let Some(session_log_dir) = args.session_logs {
-        let now = Local::now().format("%Y-%m-%dT%H_%M_%S.jsonl").to_string();
-        let path = session_log_dir.join(now);
-        SessionLog::new(&path).map_err(|err| anyhow!("{}: {err}", path.display()))?
-    } else {
-        SessionLog::null()
-    };
-
-    let resume_history = args
-        .resume
-        .map(|resume_from| {
-            SessionLog::load(&resume_from)
-                .map_err(|err| anyhow!("{}: {err}", resume_from.display()))
-        })
-        .transpose()?;
+    // Use the CLI's `--resume` if provided, otherwise default to Fresh.
+    let resume = args.resume.unwrap_or(Resume::Fresh);
+    let manager = SessionManager::new(args.session_logs.as_deref(), &resume)?;
 
     let llm =
         llimorse::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT), None).await?;
-    let mut agent = llimorse::Agent::new_with_listener(llm, session_log_file);
+    let mut agent = llimorse::Agent::new_with_listener(llm, manager.log);
 
-    if let Some(history) = &resume_history {
-        agent.push_history(history.clone());
+    if !manager.history.is_empty() {
+        agent.push_history(manager.history.clone());
     } else if let Some(system_prompt) = system_prompt {
         agent.push_system(system_prompt);
     }
@@ -172,7 +162,7 @@ async fn main() -> Result<()> {
         let task_file = tools::tasks::TaskFile::open(task_file.clone())
             .with_context(|| format!("{}", task_file.display()))?;
 
-        if resume_history.is_none() {
+        if manager.history.is_empty() {
             task_file.inject_active_tasks(&mut agent);
         }
         task_file.add_tools(&mut agent);
@@ -202,13 +192,10 @@ async fn main() -> Result<()> {
         now.to_rfc3339_opts(SecondsFormat::Secs, false)
     ));
 
-    let mut app = if let Some(resume_history) = resume_history {
-        llimorse_chat::App::new_with_history(agent, &resume_history, |agent, history| {
+    let mut app =
+        llimorse_chat::App::new_with_history(agent, &manager.history, |agent, history| {
             Ok(TermUi::new(agent, history))
-        })?
-    } else {
-        llimorse_chat::App::new(agent, |agent, history| Ok(TermUi::new(agent, history)))?
-    };
+        })?;
 
     app.run().await
 }
