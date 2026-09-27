@@ -18,14 +18,16 @@ subdirectory; the worktree is keyed on the top-level path):
     ./lemonade.sh                 # lemon --zesty
     ./lemonade.sh <extra args>    # forwarded after --zesty
     ./lemonade.sh --system <host file> # push a system prompt in
+    ./lemonade.sh --ignore-divergence # start on a worktree that holds
+                                       # un-fetched work, as-is
 
 Steps:
 
 1. Lemonade's own flags are intercepted from the arguments (see System
    prompt below), then the divergence gate runs against any existing
    worktree (see The divergence gate below): un-fetched work aborts the
-   run, a worktree that is a strict subset of the checkout is re-cloned
-   with a note.
+   run (or starts as-is with --ignore-divergence), a worktree that is a
+   strict subset of the checkout is re-cloned with a note.
 2. Build the image (refresh) from the Containerfile embedded in the
    script itself, passed on stdin (`-f -`) with no context argument —
    the context is podman's internal temp dir holding that file only, so
@@ -135,13 +137,20 @@ result:
   (including a branch the checkout no longer has), the worktree has
   uncommitted changes, or the worktree is on a detached HEAD (a commit
   on no branch). The run refuses to start, lists each offender with the
-  worktree and checkout tips, and offers the two exits: `git fetch
-  lemon-worktree` and then merge, or `lemonade.sh --force-fresh`.
+  worktree and checkout tips, and offers the exits: `git fetch
+  lemon-worktree` and then merge, `lemonade.sh --force-fresh` to
+  discard the work, or `lemonade.sh --ignore-divergence` to start on
+  the worktree as-is. The last overrides only the refusal: nothing is
+  wiped or re-cloned (a re-clone would destroy the at-risk work), the
+  work is left exactly as found, and the post-session reminder still
+  reports it — the flag defers the fetch-or-discard decision, it does
+  not make it.
 - **stale** — nothing at risk, but the worktree is missing state the
   checkout has: the checkout is ahead on a branch, has a branch the
   worktree lacks, or has switched branch. No decision to make — the run
   re-clones the worktree with a note and starts; every commit in it is
-  already in the checkout, so the clone loses nothing.
+  already in the checkout, so the clone loses nothing. The re-clone is
+  suppressed while at risk, since it would destroy that work.
 - **equal** — the run starts as is.
 
 `--force-fresh` wipes the worktree directory — the session logs under

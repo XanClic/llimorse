@@ -17,6 +17,11 @@
 #                             # lacks, or a clean slate is wanted: wipe
 #                             # the worktree (session logs kept) and start
 #                             # from a fresh clone of the checkout
+#   lemonade.sh --ignore-divergence # the worktree holds work this
+#                             # checkout lacks: start on it as-is instead
+#                             # of refusing. Nothing is wiped or
+#                             # re-cloned; the work still dies at reboot
+#                             # until fetched
 #
 # The container runs with --rm: it and its writable layer (target/,
 # runtime dnf installs) are gone when lemon exits. The worktree and the
@@ -28,8 +33,9 @@
 # can move apart — and it is on tmpfs, so work in it that has not been
 # fetched into the checkout dies at reboot. A session therefore refuses to
 # start while the worktree holds commits the checkout lacks or uncommitted
-# changes: fetch them (git fetch lemon-worktree) or discard them
-# (--force-fresh). A worktree that is merely behind the checkout is
+# changes: fetch them (git fetch lemon-worktree), discard them
+# (--force-fresh), or start on the worktree as-is with --ignore-divergence
+# and fetch later. A worktree that is merely behind the checkout is
 # re-cloned with a note — nothing in it is missing from the checkout, so
 # the clone loses nothing. When lemon exits, the script reports any
 # un-fetched work, so the fetch decision happens while it is still fresh.
@@ -103,8 +109,14 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # would refuse to start while it holds un-fetched work — or simply start
 # from a clean slate. Only the worktree directory is wiped; the session
 # logs under $SESSIONS are kept.
+#
+# --ignore-divergence: override the gate's refusal to start while the
+# worktree holds work this checkout lacks. The worktree is started as-is:
+# nothing is wiped or re-cloned (a re-clone would destroy the work), and
+# the post-session reminder still reports it.
 SYSFILE=""
 FORCE_FRESH=""
+IGNORE_DIVERGENCE=""
 NEW_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -120,6 +132,10 @@ while [ $# -gt 0 ]; do
             ;;
         --force-fresh)
             FORCE_FRESH=1
+            shift
+            ;;
+        --ignore-divergence)
+            IGNORE_DIVERGENCE=1
             shift
             ;;
         *)
@@ -273,21 +289,32 @@ fi
 #             start: the user must fetch the work or explicitly discard
 #             it with --force-fresh. A bare note is how work gets
 #             forgotten, and forgetting is the failure mode.
+#             --ignore-divergence overrides the refusal: start on the
+#             worktree as-is. Nothing is wiped or re-cloned — the work
+#             is left exactly as found — and the post-session reminder
+#             still reports it.
 #   stale   — the worktree is a strict subset of the checkout (the
 #             checkout moved on, added branches, or switched branch).
 #             Nothing at risk, no decision to make: re-clone with a note
 #             and start; every commit in the worktree is already here.
+#             Suppressed while at risk: re-cloning would destroy the
+#             at-risk work.
 #   equal   — start as is.
 check_divergence
 if [ "$WT_AT_RISK" = 1 ]; then
-    err "The worktree has work that this checkout does not have."
-    note "It lives on tmpfs and dies at reboot; the only durable copy of it is a fetch into this checkout:"
+    if [ -z "$IGNORE_DIVERGENCE" ]; then
+        err "The worktree has work that this checkout does not have."
+        note "It lives on tmpfs and dies at reboot; the only durable copy of it is a fetch into this checkout:"
+        print_risk_lines 7 >&2
+        note "Fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
+        note "Or discard:  lemonade.sh --force-fresh"
+        note "Or ignore:   lemonade.sh --ignore-divergence"
+        exit 1
+    fi
+    warn "--ignore-divergence: starting anyway; the worktree holds work this checkout lacks (still on tmpfs — fetch it before reboot):"
     print_risk_lines 7 >&2
-    note "Fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
-    note "Or discard:  lemonade.sh --force-fresh"
-    exit 1
 fi
-if [ "$WT_STALE" = 1 ]; then
+if [ "$WT_STALE" = 1 ] && [ "$WT_AT_RISK" != 1 ]; then
     note "The worktree is behind this checkout; re-cloning it from $TOPLEVEL (every commit in it is already here, so this loses nothing):"
     print_stale_reasons 6
     rm -rf "$WORKTREE"
