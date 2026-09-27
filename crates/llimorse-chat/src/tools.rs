@@ -1,8 +1,14 @@
 //! Helpers for tools, for use with llimorse-chat
 
-use crate::ui;
+use crate::history::HistoryEntryType;
+use crate::{ChatHistory, ui};
+use anyhow::Result;
+use llimorse::line_format::ToolCall;
+use llimorse::{Agent, StreamingChunk};
 use llimorse_tools::{GateableToolParams, ToolGate};
 use std::result;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 /// A [`ToolGate`] that sends a permission request to the UI and waits for the user's decision.
@@ -40,6 +46,140 @@ impl ToolGate for UserToolGate {
 
         wait.await
             .map_err(|_| "permission request cancelled (UI closed)".to_string())?
+    }
+}
+
+/// Connects the subagent tool to a llimorse-chat app
+///
+/// New subagents registered with this will send the appropriate notifications to the UI and thus
+/// register themselves with it.
+#[derive(Debug)]
+pub struct SubagentNotifier {
+    /// A notification channel to inform the llimorse-chat app of notifications
+    notifications: mpsc::UnboundedSender<ui::Notification>,
+
+    /// A counter to auto-generate distinct subagent IDs
+    subagent_id_counter: AtomicUsize,
+}
+
+/// Connects a subagent to a llimorse-chat app
+#[derive(Debug)]
+pub struct SubagentConnector {
+    /// The auto-generated subagent ID
+    id: usize,
+
+    /// The subagents chat history
+    chat_history: Arc<Mutex<ChatHistory>>,
+
+    /// A notification channel to inform the llimorse-chat app of notifications
+    notifications: mpsc::UnboundedSender<ui::Notification>,
+}
+
+impl SubagentNotifier {
+    /// Create a new subagent notifier object for a llimorse-chat app.
+    ///
+    /// New subagents registered with this will send the appropriate notifications over
+    /// `notifications` and thus register themselves with the UI.
+    pub fn new(notifications: &ui::NotificationChannel) -> Self {
+        SubagentNotifier {
+            notifications: notifications.sender(),
+            subagent_id_counter: 0.into(),
+        }
+    }
+}
+
+impl llimorse_tools::subagent::SubagentNotifier for SubagentNotifier {
+    type Error = anyhow::Error;
+    type Subagent = SubagentConnector;
+
+    async fn created(&self, agent: &Agent, prompt: &str) -> Result<SubagentConnector> {
+        let subagent = SubagentConnector::new(
+            self.subagent_id_counter.fetch_add(1, Ordering::Relaxed),
+            self.notifications.clone(),
+        );
+
+        subagent
+            .chat_history
+            .lock()
+            .unwrap()
+            .push_lines(prompt, HistoryEntryType::User, true);
+
+        let _ = self.notifications.send(ui::Notification::SubagentCreated {
+            subagent_id: subagent.id,
+            prompt: prompt.to_string(),
+            client_state: agent.client_state_arc(),
+            chat_history: Arc::clone(&subagent.chat_history),
+        });
+
+        Ok(subagent)
+    }
+}
+
+impl SubagentConnector {
+    /// Create a new subagent connector for a llimorse-chat app.
+    ///
+    /// `id` is the generated subagent ID, `notifications` is a channel to inform the UI of
+    /// changes.
+    fn new(id: usize, notifications: mpsc::UnboundedSender<ui::Notification>) -> Self {
+        SubagentConnector {
+            id,
+            chat_history: Default::default(),
+            notifications,
+        }
+    }
+}
+
+impl Drop for SubagentConnector {
+    fn drop(&mut self) {
+        let _ = self.notifications.send(ui::Notification::SubagentDropped {
+            subagent_id: self.id,
+        });
+    }
+}
+
+impl llimorse_tools::subagent::SubagentConnector for SubagentConnector {
+    type Error = anyhow::Error;
+
+    async fn push_chunk(&self, chunk: StreamingChunk) {
+        let (string, kind) = match chunk {
+            StreamingChunk::Content(c) => (c, HistoryEntryType::Content),
+            StreamingChunk::Reasoning(r) => (r, HistoryEntryType::Reasoning),
+        };
+        self.chat_history
+            .lock()
+            .unwrap()
+            .push_lines(&string, kind, false);
+    }
+
+    fn tool_call(&self, agent: &Agent, call: &ToolCall) -> Result<()> {
+        self.chat_history.lock().unwrap().push_lines(
+            &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
+            HistoryEntryType::ToolCall,
+            true,
+        );
+        Ok(())
+    }
+
+    fn tool_result(&self, agent: &Agent, call: &ToolCall, result: &Result<String>) -> Result<()> {
+        let name = call.call.name();
+        let id = &call.id;
+        match result {
+            Ok(result) => self.chat_history.lock().unwrap().push_lines(
+                &format!(
+                    "=[{name}/{id}]=> {}\n",
+                    agent.display_call_result(&call.call, result)
+                ),
+                HistoryEntryType::ToolResultOk,
+                true,
+            ),
+            Err(err) => self.chat_history.lock().unwrap().push_lines(
+                &format!("=[{name}/{id}]=> {err}\n"),
+                HistoryEntryType::ToolResultErr,
+                true,
+            ),
+        }
+
+        Ok(())
     }
 }
 

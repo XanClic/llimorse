@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
-pub use tools::UserToolGate;
+pub use tools::{SubagentNotifier, UserToolGate};
 pub use ui::UiState;
 
 /// The application state
