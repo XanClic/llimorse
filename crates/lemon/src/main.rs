@@ -128,15 +128,16 @@ async fn main() -> Result<()> {
 
     let ui_notifications = llimorse_chat::ui::NotificationChannel::new();
 
-    agent.add_tool(llimorse_tools::View::new());
-    agent.add_tool(llimorse_tools::Write::new());
-    agent.add_tool(llimorse_tools::Edit::new());
+    agent.add_tool(llimorse_tools::View::new(llimorse_tools::AutoApprove));
     if args.zesty {
+        agent.add_tool(llimorse_tools::Write::new(llimorse_tools::AutoApprove));
+        agent.add_tool(llimorse_tools::Edit::new(llimorse_tools::AutoApprove));
         agent.add_tool(llimorse_tools::Bash::new(llimorse_tools::AutoApprove));
     } else {
-        agent.add_tool(llimorse_tools::Bash::new(llimorse_chat::UserToolGate::new(
-            &ui_notifications,
-        )));
+        let gate = llimorse_chat::UserToolGate::new(&ui_notifications);
+        agent.add_tool(llimorse_tools::Write::new(gate.clone()));
+        agent.add_tool(llimorse_tools::Edit::new(gate.clone()));
+        agent.add_tool(llimorse_tools::Bash::new(gate));
     }
 
     if let Some(searxng_url) = &args.searxng_url {

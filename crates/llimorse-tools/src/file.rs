@@ -1,5 +1,6 @@
 //! File tools.
 
+use super::ToolGate;
 use anyhow::{Result, anyhow, bail};
 use helpers::TruncatedDisplay;
 use llimorse::CallableTool;
@@ -33,8 +34,11 @@ llimorse::tool! {
     }
 
     /// Allow reading files (unrestricted), in whole or in part.
-    #[derive(Default, Debug)]
-    'state: pub struct View {}
+    #[derive(Debug)]
+    'state: pub struct View<G: ToolGate> {
+        /// Gate for receiving permissions to read files
+        gate: G,
+    }
 }
 
 impl fmt::Display for ViewParams {
@@ -60,15 +64,20 @@ impl fmt::Display for ViewResult {
     }
 }
 
-impl View {
+impl<G: ToolGate> View<G> {
     /// Allow viewing files (anywhere)
-    pub fn new() -> Self {
-        View::default()
+    pub fn new(gate: G) -> Self {
+        View { gate }
     }
 }
 
-impl CallableTool for View {
+impl<G: ToolGate> CallableTool for View<G> {
     async fn execute(&self, params: ViewParams) -> Result<ViewResult> {
+        self.gate
+            .permitted(&params)
+            .await
+            .map_err(|e| anyhow!("View tool call rejected: {e}"))?;
+
         let file = File::open(&params.filename)
             .map_err(|err| anyhow!("Failed to open {}: {err}", params.filename.display()))?;
         let reader = BufReader::new(file);
@@ -135,8 +144,11 @@ llimorse::tool! {
     }
 
     /// Overwrite files (unrestricted) in whole
-    #[derive(Default, Debug)]
-    'state: pub struct Write {}
+    #[derive(Debug)]
+    'state: pub struct Write<G: ToolGate> {
+        /// Gate for receiving permissions to overwrite files
+        gate: G,
+    }
 }
 
 impl fmt::Display for WriteParams {
@@ -161,15 +173,20 @@ impl fmt::Display for WriteResult {
     }
 }
 
-impl Write {
+impl<G: ToolGate> Write<G> {
     /// Overwrite files (anywhere) in whole
-    pub fn new() -> Self {
-        Write::default()
+    pub fn new(gate: G) -> Self {
+        Write { gate }
     }
 }
 
-impl CallableTool for Write {
+impl<G: ToolGate> CallableTool for Write<G> {
     async fn execute(&self, params: WriteParams) -> Result<WriteResult> {
+        self.gate
+            .permitted(&params)
+            .await
+            .map_err(|e| anyhow!("Write tool call rejected: {e}"))?;
+
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -215,8 +232,11 @@ llimorse::tool! {
     }
 
     /// Substitute strings in files (unrestricted)
-    #[derive(Default, Debug)]
-    'state: pub struct Edit {}
+    #[derive(Debug)]
+    'state: pub struct Edit<G: ToolGate> {
+        /// Gate for receiving permissions to edit files
+        gate: G,
+    }
 }
 
 impl fmt::Display for EditParams {
@@ -242,15 +262,20 @@ impl fmt::Display for EditResult {
     }
 }
 
-impl Edit {
+impl<G: ToolGate> Edit<G> {
     /// Substitute strings in files (unrestricted)
-    pub fn new() -> Self {
-        Edit::default()
+    pub fn new(gate: G) -> Self {
+        Edit { gate }
     }
 }
 
-impl CallableTool for Edit {
+impl<G: ToolGate> CallableTool for Edit<G> {
     async fn execute(&self, params: EditParams) -> Result<EditResult> {
+        self.gate
+            .permitted(&params)
+            .await
+            .map_err(|e| anyhow!("Edit tool call rejected: {e}"))?;
+
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
