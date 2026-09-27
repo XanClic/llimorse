@@ -297,24 +297,26 @@ impl TermUi {
         let stage = self.animated_stage_emoji(client_state.operation_stage);
 
         let tokens = client_state.token_usage.sum();
-        let prefill_suffix = if let Some(prefill_target) = client_state.token_usage.prefill_target
+        let target_suffix = if let Some(prefill_target) = client_state.token_usage.prefill_target
             && client_state.operation_stage == AgentStage::Prefill
         {
             Cow::Owned(format!("… [{:.1}k]", prefill_target as f32 * 1.0e-3))
+        } else if client_state.operation_stage.is_processing() {
+            Cow::Borrowed("…")
         } else {
             Cow::Borrowed("")
         };
 
         let title = if let Some(context_size) = self.client_info.context_size {
             format!(
-                " {} {stage} {:.1}k{prefill_suffix} / {:.1}k ",
+                " {} {stage} {:.1}k{target_suffix} / {:.1}k ",
                 self.client_info.model_name,
                 tokens as f32 * 1.0e-3,
                 context_size as f32 * 1.0e-3,
             )
         } else {
             format!(
-                " {} {stage} {:.1}k{prefill_suffix} ",
+                " {} {stage} {:.1}k{target_suffix} ",
                 self.client_info.model_name,
                 tokens as f32 * 1.0e-3,
             )

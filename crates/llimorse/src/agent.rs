@@ -601,3 +601,16 @@ impl ChatHistory {
         self.history.append(&mut messages);
     }
 }
+
+impl AgentStage {
+    /// Return whether the agent is currently processing something (generating or in prefill)
+    pub fn is_processing(&self) -> bool {
+        match self {
+            AgentStage::Idle | AgentStage::ToolExecution => false,
+            AgentStage::Prefill
+            | AgentStage::Reasoning
+            | AgentStage::ResponseGeneration
+            | AgentStage::ToolCallGeneration => true,
+        }
+    }
+}
