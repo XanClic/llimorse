@@ -48,7 +48,7 @@ Steps:
    divergence gate's per-branch comparison assumes away), then\
    `git remote remove origin` (the review gate),
    `git config receive.denyCurrentBranch updateInstead` (so the host can
-   push into the checked-out branch mid-session; refused while dirty),
+   push into the checked-out branch between sessions; refused while dirty),
    and a copy of the author identity: `user.name`/`user.email` are
    resolved where the source checkout lives (local config, then host
    global/system) and pinned in the worktree's local config, because the
@@ -60,7 +60,9 @@ Steps:
    path.
 4. Start the SearXNG sidecar for `web_search` on a private per-session
    network.
-5. `podman run --rm -it` on that network with the worktree, the
+5. `podman run --rm -it` on that network with the worktree as an overlay
+   at `/work` (see The container never writes the worktree below), the
+   export handover directory at `/xfer`, the
    per-checkout session-log directory at `/sessions`, and the lemon
    binary bind-mounted — plus the built-in environment description at
    `/system-prompt-env.md`, always, and the chosen system prompt file at
@@ -72,7 +74,8 @@ Steps:
    command for the newest log when lemon exits (see Session logs and
    resume below).
 
-When lemon exits, the script runs the divergence check once more and
+When lemon exits, the script imports the session's exported git state
+into the worktree, then runs the divergence check once more and
 reports any un-fetched work in the worktree, so the fetch-or-discard
 decision happens while the session is fresh (see The divergence gate
 below).
@@ -120,13 +123,48 @@ so the command is the same on every checkout. It lives only on the host
 side — the worktree itself still has nowhere to push — so the gate is
 unchanged.
 
-Iteration while the session is alive is host-initiated:
+Between sessions, the host can push into the worktree:
 
     git push lemon-worktree main
 
 with `receive.denyCurrentBranch=updateInstead` set in the worktree, which
 refreshes the checked-out branch — and is refused while the worktree is
-dirty, which is the behavior you want.
+dirty, which is the behavior you want. Not while a session runs: the
+worktree is then the lower layer of the container's overlay, which must
+not change underneath a mounted overlay, and the import at session end
+would overwrite the push anyway.
+
+### The container never writes the worktree
+
+The worktree's `.git` is an ordinary repository on the host, meant to be
+used with any git command, a shell prompt's git integration included. A
+repository an agent has written is not safe for that: git executes
+commands named in a repository's own config (`core.fsmonitor`, for
+one) and runs its hooks, and a repository owned by the host user passes
+git's ownership check. So the container never gets to write it.
+
+The worktree is mounted at `/work` as an overlay (podman's `:O`): lemon
+sees the tree as the host left it and changes a copy, which podman
+discards with the container. When lemon exits, a wrapper around it in
+the container (`EXPORT_SESSION` in the script) writes the session's git
+state to `/xfer`, a per-checkout directory under
+`${TMPDIR:-/tmp}/lemon/xfer/`: a `git bundle` of all refs, and HEAD.
+Uncommitted changes — untracked, non-ignored files included — go into
+the bundle as a commit on `refs/session/uncommitted`. Files ignored by
+git are not carried back.
+
+The script then imports that into the worktree (`import_session`):
+branches and tags mirror the bundle (branches the session deleted are
+deleted), HEAD is set, the working tree is reset to HEAD and cleaned of
+untracked files, and the uncommitted changes are laid on top as unstaged
+changes and untracked files. Only the bundle, which git reads as data as
+it would a fetch from any untrusted remote, and a validated HEAD line
+cross from the container to the host.
+
+If the container is killed rather than lemon exiting, nothing is
+exported, and the session's work is lost. If the script dies between the
+container's exit and the import, the export waits in `/xfer`, and the
+next run imports it before anything else.
 
 Iteration does not survive the session: once the worktree is gone
 (reboot, or manual deletion), anything not fetched is gone, uncommitted
@@ -172,14 +210,14 @@ the checked-out branch: a wipe has no checked-out-branch or dirty-tree
 edge cases, and its contract is simply "the worktree becomes exactly
 the checkout".
 
-The comparison needs the worktree's commits in the checkout's object
-store, which the review gate (no remotes in the worktree) keeps out, so
-the gate starts with `git fetch lemon-worktree` — read-only, landing in
-`lemon-worktree/*` remote-tracking refs, nothing merged. When lemon
-exits, the same check runs again as a reminder rather than a stop, so
-the fetch-or-discard decision happens while the session is fresh in the
-user's head; that fetch also leaves the remote-tracking refs ready for
-an immediate `git merge lemon-worktree/<branch>`.
+The comparison fetches nothing: the checkout receives the worktree's
+work only when the user fetches it. A worktree tip whose commit the
+checkout does not have at all is work the checkout lacks by definition;
+one the checkout does have is checked for ancestry there. The number of
+commits at risk is counted in the worktree, which has the checkout's
+commits from the clone. When lemon exits, the same check runs again as a
+reminder rather than a stop, so the fetch-or-discard decision happens
+while the session is fresh in the user's head.
 
 ## Ephemeral storage, by lifetime
 
@@ -189,6 +227,8 @@ Most disposable inside, least outside:
 | ------------------- | ------------------------------ | ---------------- |
 | `target/` artifacts | anonymous podman volume mounted at `/work/target` | `podman rm` (automatic via `--rm`) |
 | SearXNG sidecar     | container + private network; settings in a `${TMPDIR:-/tmp}` temp file | script exit (EXIT trap) |
+| `/work` changes     | the container's overlay upper layer | `podman rm` (after the export) |
+| session export      | `${TMPDIR:-/tmp}/lemon/xfer/<basename>-<hash>`, mounted at `/xfer` (tmpfs) | the import |
 | worktree (code)     | `${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>` (tmpfs) | reboot |
 | session logs        | `${TMPDIR:-/tmp}/lemon/sessions/<basename>-<hash>`, mounted at `/sessions` (tmpfs) | reboot |
 | your checkout       | host disk                      | never |
@@ -199,11 +239,11 @@ gets `-v /work/target`, an anonymous volume (in podman's volume storage
 on disk) mounted over cargo's default target directory — but only when
 the repo root has a `Cargo.toml`, since the redirect is cargo-specific.
 Podman sets the mount up at container start, nested inside the `/work`
-bind mount, so the container needs no CAP_SYS_ADMIN (which mounting
+overlay, so the container needs no CAP_SYS_ADMIN (which mounting
 from inside would, and which a coding agent should not get); `--rm`
-deletes anonymous volumes along with the container. On the host the
-worktree only gets an empty `target/` mount point, which git ignores
-regardless of `.gitignore`. Worktrees from before the volume carry a
+deletes anonymous volumes along with the container. The `target/`
+mount point is created in the overlay, not in the worktree on the
+host. Worktrees from before the volume carry a
 `target -> /target` symlink left by the old entrypoint; the script
 removes it before mounting, since podman would resolve the mount
 destination through it.
@@ -269,8 +309,9 @@ A first `--system` file is pushed in unconditionally, before whatever the
 above chose (or alone, when nothing was chosen): a short description of
 the environment the agent runs in, embedded in the script, written to a
 temp file, and mounted read-only at `/system-prompt-env.md`. It tells
-the agent that it is root in a disposable Fedora container with `/work`
-on tmpfs, that a full toolchain is preinstalled, and that it is free to
+the agent that it is root in a disposable Fedora container, that `/work`
+is a copy whose git state is carried back at session end (ignored files
+are not), that a full toolchain is preinstalled, and that it is free to
 do whatever it wants — including installing more packages with dnf or
 pip, whose installs die with the container. It is passed first, so in
 the concatenated prompt the environment precedes the user's file.
@@ -297,8 +338,10 @@ the host in the meantime. No rebuild of anything is involved.
   different checkouts never collide. The flip side: a run killed
   without its EXIT trap (SIGKILL) leaves its sidecar running, and no
   later run removes it; `podman rm -f lemonade-searxng-<pid>` does.
-- Bind mounts always carry the `:z` SELinux label: a no-op on hosts
-  without SELinux, and what an enforcing host needs.
+- Bind mounts carry the `:z` SELinux label: a no-op on hosts without
+  SELinux, and what an enforcing host needs. The worktree's `:O` overlay
+  mount takes no relabel option; whether it works on an enforcing host
+  is untested.
 - The image assumes the host lemon binary is glibc/x86_64, matching
   Fedora.
 - The container has full network by default; the container boundary plus
@@ -307,9 +350,13 @@ the host in the meantime. No rebuild of anything is involved.
   partial deletion) aborts the run with a message; `rm -rf` it — or run
   with `--force-fresh` — to proceed.
 - One session per checkout: the worktree hash is keyed on the path, so
-  two lemonade runs from the same checkout share one worktree, and two
-  containers writing one `.git` is index-lock contention. Running two
-  concurrently is unsupported by design; there is deliberately no guard.
+  two lemonade runs from the same checkout share one worktree and one
+  export directory. Each starts from the worktree as it was, and each
+  import replaces the worktree's state with its own session's: the
+  session that ends last wins, and the other's work is lost (a session
+  starting while another runs also clears the export directory under
+  it). Running two concurrently is unsupported by design; there is
+  deliberately no guard.
 - `podman run` uses `-it`: a TTY is assumed, and for now that is a hard
   requirement, because lemon itself requires a TTY — headless or piped
   invocations cannot work. If lemon ever runs without a TTY, making `-t`

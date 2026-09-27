@@ -48,6 +48,17 @@
 # re-cloned with a note — nothing in it is missing from the checkout, so
 # the clone loses nothing. When lemon exits, the script reports any
 # un-fetched work, so the fetch decision happens while it is still fresh.
+#
+# The container never writes the worktree: it is mounted as an overlay
+# (podman's :O), so lemon works on a copy and the worktree's .git stays
+# as the host left it — safe to use with any git command. When lemon
+# exits, a wrapper in the container exports the session's git state (all
+# branches and tags, HEAD, and uncommitted changes including untracked
+# files; not files ignored by git) as a git bundle, and the script
+# imports it into the worktree. The bundle, which is data, is the only
+# thing that crosses from the container to the host. If the container is
+# killed rather than lemon exiting, nothing is exported, and the
+# session's work is lost.
 
 set -euo pipefail
 
@@ -85,6 +96,9 @@ WORKTREE="$WORKTREE_ROOT/$KEY"
 SESSIONS_ROOT="$LEMON_ROOT/sessions"
 SESSIONS="$SESSIONS_ROOT/$KEY"
 mkdir -p "$SESSIONS"
+# Where the container leaves the session's git state for import_session;
+# empty between sessions.
+XFER="$LEMON_ROOT/xfer/$KEY"
 
 # One-time move from the old layout (${TMPDIR:-/tmp}/lemon-worktrees):
 # same filesystem, so it is a rename; an orphaned old-layout worktree
@@ -185,8 +199,10 @@ cat > "$ENV_PROMPT" <<'LEMONADE_PROMPT'
 You are an agent running as root inside a disposable Podman container (Fedora),
 with the working directory /work: the git repository of the project to work on.
 The container itself — including anything you install into it — is deleted when
-the session ends. What is in /work lives on tmpfs on the host and will survive
-for the user to fetch the results.
+the session ends. /work is a copy; when the session ends, its git state is
+carried back to the host for the user to fetch: all branches and tags, HEAD,
+and uncommitted changes, including untracked files. Files ignored by git are
+not carried back.
 
 You are free to do whatever you want. A full development toolchain is
 preinstalled (git, rustup with a nightly toolchain, cargo, make/gcc, python3
@@ -255,11 +271,13 @@ fi
 #                  only the checkout has, or a different checked-out branch
 #   RISK_LINES, STALE_REASONS  the human-readable report lines
 #
-# The worktree has no remotes (the review gate), so this checkout cannot
-# see commits lemon made there unless it fetches them: the fetch below is
-# read-only and lands in lemon-worktree/* remote-tracking refs — nothing
-# is merged. With no worktree yet (first run, or one just wiped) there is
-# nothing to compare.
+# Nothing is fetched: the checkout only receives the worktree's work when
+# the user fetches it. A worktree tip whose commit the checkout does not
+# have at all holds work the checkout lacks by definition; one it does
+# have is checked for ancestry in the checkout. The worktree's .git is
+# never written by the container (see the overlay mount below), so running
+# git in it here is safe. With no worktree yet (first run, or one just
+# wiped) there is nothing to compare.
 check_divergence() {
     WT_AT_RISK=0
     WT_STALE=0
@@ -267,21 +285,23 @@ check_divergence() {
     STALE_REASONS=()
     [ -d "$WORKTREE/.git" ] || return 0
 
-    git -C "$TOPLEVEL" fetch lemon-worktree --quiet
-
-    local b wt_tip host_tip
+    local b wt_tip host_tip n
     while IFS= read -r b; do
         [ -n "$b" ] || continue
         wt_tip=$(git -C "$WORKTREE" rev-parse --verify --quiet "refs/heads/$b") || continue
         if ! host_tip=$(git -C "$TOPLEVEL" rev-parse --verify --quiet "refs/heads/$b"); then
             WT_AT_RISK=1
             RISK_LINES+=("$b: exists only in the worktree (no such branch in this checkout)")
-            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "refs/heads/$b")")
-        elif ! git -C "$TOPLEVEL" merge-base --is-ancestor "lemon-worktree/$b" "refs/heads/$b"; then
+            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "$wt_tip")")
+        elif ! git -C "$TOPLEVEL" cat-file -e "$wt_tip^{commit}" 2>/dev/null ||
+             ! git -C "$TOPLEVEL" merge-base --is-ancestor "$wt_tip" "$host_tip"; then
             WT_AT_RISK=1
-            RISK_LINES+=("$b: $(git -C "$TOPLEVEL" rev-list --count "refs/heads/$b..$wt_tip") commit(s) in the worktree that this checkout lacks")
-            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "refs/heads/$b"), checkout @ $(git -C "$TOPLEVEL" rev-parse --short "refs/heads/$b")")
-        elif [ "$(git -C "$TOPLEVEL" rev-parse "refs/heads/$b")" != "$(git -C "$TOPLEVEL" rev-parse "lemon-worktree/$b")" ]; then
+            # Counted in the worktree: it has the checkout's commits from
+            # the clone, while the checkout may not have the worktree's.
+            n=$(git -C "$WORKTREE" rev-list --count "$wt_tip" "^$host_tip" 2>/dev/null || echo "some")
+            RISK_LINES+=("$b: $n commit(s) in the worktree that this checkout lacks")
+            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "$wt_tip"), checkout @ $(git -C "$TOPLEVEL" rev-parse --short "$host_tip")")
+        elif [ "$wt_tip" != "$host_tip" ]; then
             WT_STALE=1
             STALE_REASONS+=("this checkout is ahead of the worktree on $b")
         fi
@@ -329,6 +349,92 @@ print_stale_reasons() {
     for l in "${STALE_REASONS[@]}"; do printf '%*s%s\n' "$1" '' "$l"; done
 }
 
+# Session export: runs in the container as `bash -c "$EXPORT_SESSION"
+# export-session <agent command...>`. It runs the agent, then writes the
+# session's git state from /work (the overlay copy) to /xfer: a bundle of
+# all refs, and HEAD (a symbolic ref, or a SHA when detached). Uncommitted
+# changes — untracked, non-ignored files included — become a commit on
+# refs/session/uncommitted, built with a throwaway index so the agent's
+# index is not needed. The files are written under temporary names and
+# renamed at the end, so a half-written export never looks complete.
+# INT is caught (not ignored, which the agent would inherit), so a Ctrl-C
+# that ends the agent does not also end the wrapper before the export.
+EXPORT_SESSION=$(cat <<'EXPORT_SESSION'
+trap : INT
+"$@"
+status=$?
+cd /work || exit "$status"
+git update-ref -d refs/session/uncommitted 2>/dev/null
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+    idx=$(mktemp)
+    if GIT_INDEX_FILE="$idx" git read-tree HEAD &&
+       GIT_INDEX_FILE="$idx" git add -A &&
+       tree=$(GIT_INDEX_FILE="$idx" git write-tree) &&
+       [ "$tree" != "$(git rev-parse 'HEAD^{tree}')" ]; then
+        wip=$(GIT_AUTHOR_NAME=session GIT_AUTHOR_EMAIL=session@localhost \
+              GIT_COMMITTER_NAME=session GIT_COMMITTER_EMAIL=session@localhost \
+              git commit-tree "$tree" -p HEAD -m 'Uncommitted changes at session end') &&
+            git update-ref refs/session/uncommitted "$wip"
+    fi
+    rm -f "$idx"
+fi
+if { git symbolic-ref --quiet HEAD || git rev-parse --verify HEAD; } > /xfer/HEAD.tmp &&
+   git bundle create --quiet /xfer/session.bundle.tmp --all &&
+   mv /xfer/HEAD.tmp /xfer/HEAD &&
+   mv /xfer/session.bundle.tmp /xfer/session.bundle; then
+    :
+else
+    echo "Exporting the session's git state failed; its work will not reach the worktree." >&2
+fi
+exit "$status"
+EXPORT_SESSION
+)
+
+# Session import: bring the state EXPORT_SESSION left in $XFER into the
+# worktree, which then looks exactly as /work did when the agent exited:
+# branches and tags mirror the bundle (--prune drops those the session
+# deleted), HEAD is set, the working tree is reset to it and cleaned of
+# untracked files (ignored ones stay), and uncommitted changes are laid
+# on top as unstaged changes and untracked files. Only the bundle and the
+# validated HEAD line are read; git treats the bundle as data, as it
+# would a fetch from any untrusted remote. Idempotent: the export is
+# removed only once everything succeeded, so an interrupted import is
+# redone by the next run.
+import_session() {
+    local bundle="$XFER/session.bundle" head
+    [ -e "$bundle" ] || return 0
+    if [ ! -d "$WORKTREE/.git" ]; then
+        warn "Discarding a session export in $XFER: the worktree it belongs to is gone."
+        rm -rf "$XFER"
+        return 0
+    fi
+    if [ -L "$bundle" ] || [ ! -f "$bundle" ] || [ -L "$XFER/HEAD" ] || [ ! -f "$XFER/HEAD" ]; then
+        err "Malformed session export in $XFER; inspect it, or remove it to discard the session's work."
+        exit 1
+    fi
+    head=$(head -c 256 "$XFER/HEAD" | head -n 1)
+    if ! [[ $head =~ ^refs/heads/[A-Za-z0-9._/-]+$ || $head =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        err "Malformed HEAD in the session export in $XFER; inspect it, or remove it to discard the session's work."
+        exit 1
+    fi
+
+    git -C "$WORKTREE" fetch --quiet --prune --update-head-ok --no-write-fetch-head "$bundle" \
+        '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/session/*:refs/session/*'
+    if [[ $head == refs/* ]]; then
+        git -C "$WORKTREE" symbolic-ref HEAD "$head"
+    else
+        git -C "$WORKTREE" update-ref --no-deref HEAD "$head"
+    fi
+    git -C "$WORKTREE" reset --quiet --hard
+    git -C "$WORKTREE" clean --quiet -fd
+    if git -C "$WORKTREE" rev-parse --verify --quiet refs/session/uncommitted >/dev/null; then
+        git -C "$WORKTREE" read-tree -u --reset refs/session/uncommitted
+        git -C "$WORKTREE" reset --quiet
+        git -C "$WORKTREE" update-ref -d refs/session/uncommitted
+    fi
+    rm -f "$bundle" "$XFER/HEAD"
+}
+
 # Worktree: cloned for the session, then the container owns it. Re-cloned
 # when the divergence gate below decides the worktree is stale, or when
 # --force-fresh is given.
@@ -339,7 +445,7 @@ print_stale_reasons() {
 # $SESSIONS are kept, they are the --resume handles.
 if [ -n "$FORCE_FRESH" ]; then
     note "--force-fresh: removing $WORKTREE and re-cloning from $TOPLEVEL."
-    rm -rf "$WORKTREE"
+    rm -rf "$WORKTREE" "$XFER"
 fi
 
 if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
@@ -349,10 +455,18 @@ if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
     exit 1
 fi
 
+# An export still waiting in $XFER means the last run ended between the
+# container's exit and the import (e.g. the script was killed): import it
+# now, before the divergence gate looks at the worktree.
+if [ -e "$XFER/session.bundle" ]; then
+    note "Importing the git state of an earlier session that was never imported"
+    import_session
+fi
+
 # The source checkout keeps a remote named lemon-worktree pointing at the
-# worktree, so the divergence check below — and the user's own fetches —
-# address the worktree by name, not by path: `git fetch lemon-worktree
-# <branch>` (and `git push lemon-worktree <branch>` mid-session). Added
+# worktree, so the user's fetches address the worktree by name, not by
+# path: `git fetch lemon-worktree <branch>` (and `git push lemon-worktree
+# <branch>` between sessions). Added
 # once and re-checked on every run, so the check also recovers from a
 # manually removed remote. It lives only in the source checkout — the
 # worktree itself has no remotes, so the review gate is untouched.
@@ -425,9 +539,11 @@ if [ ! -d "$WORKTREE/.git" ]; then
     # Review gate: no origin, so nothing in the container can reach your
     # checkout except you fetching it.
     git -C "$WORKTREE" remote remove origin
-    # Lets you push a branch back into the checked-out worktree
-    # mid-session: git push "$WORKTREE" <branch>
-    # (refused while the worktree is dirty).
+    # Lets you push a branch into the checked-out worktree between
+    # sessions: git push lemon-worktree <branch> (refused while the
+    # worktree is dirty). Not during a session: the worktree is then the
+    # lower layer of the container's overlay, which must not change
+    # underneath it, and the import at session end overwrites it anyway.
     git -C "$WORKTREE" config receive.denyCurrentBranch updateInstead
     # Author identity: the container has no host-side ~/.gitconfig, so
     # resolve name and email where the source checkout lives (its local
@@ -571,7 +687,13 @@ SID=$(podman run --rm -d --name "$SEARXNG" --network "$NET" \
     "$SEARXNG_IMAGE")
 note "SearXNG sidecar running — lemon's web_search backend (container '$SEARXNG', id ${SID:0:12}); it is killed when this script exits"
 
-MOUNTS=(-v "$WORKTREE:/work:z"
+# The worktree as an overlay (:O): lemon sees and changes a copy, whose
+# changes podman discards with the container; what survives is what
+# EXPORT_SESSION writes to /xfer. (:O takes no SELinux relabel option.)
+rm -rf "$XFER"
+mkdir -p "$XFER"
+MOUNTS=(-v "$WORKTREE:/work:O"
+        -v "$XFER:/xfer:z"
         -v "$SESSIONS:/sessions:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z"
         -v "$ENV_PROMPT:/system-prompt-env.md:ro,z")
@@ -626,6 +748,7 @@ podman run --rm -it \
     "${TERMINAL_ENV[@]}" \
     -w /work \
     "$IMAGE" \
+    bash -c "$EXPORT_SESSION" export-session \
     lemon --zesty \
         --llama-url "http://$LLAMA_HOST:8080" \
         --searxng-url "http://$SEARXNG:8080" \
@@ -650,12 +773,20 @@ if [ "$hint_resume" -eq 1 ]; then
     fi
 fi
 
+# Session import: the container is gone; carry its exported git state into
+# the worktree. No export means the container ended without the wrapper
+# getting to it (killed), or the export failed (the wrapper said why).
+if [ -e "$XFER/session.bundle" ]; then
+    import_session
+else
+    warn "The session exported no git state; whatever it did is lost."
+fi
+
 # Post-session reminder: un-fetched work in the worktree is on tmpfs and
 # dies at reboot. The gate above refuses to start while it exists, but the
 # moment to fetch is now, while the session is fresh in the user's head —
 # not at the next hard stop. Same check as the gate; a reminder, not a
-# stop, the session already ran. Its fetch also leaves the lemon-worktree/*
-# refs ready, so `git merge lemon-worktree/<branch>` works immediately.
+# stop, the session already ran.
 check_divergence
 if [ "$WT_AT_RISK" = 1 ]; then
     note "The worktree has work that this checkout does not have. It dies at reboot — fetch it now, or discard it deliberately:"
