@@ -552,11 +552,26 @@ case " $* " in
     *) set -- "$@" --session-logs /sessions; hint_resume=1 ;;
 esac
 
+# Terminal env from the host: without it the container runs with TERM
+# unset, which strips color from lemon's non-TUI output and removes the
+# tmux signal term-ui reads to gate its OSC 99 passthrough. COLORTERM is
+# passed through as in coolade.sh, defaulting to truecolor when the host
+# does not export one, though term-ui does not read it yet.
+TERMINAL_ENV=()
+if [ -n "${TERM:-}" ]; then
+    TERMINAL_ENV+=(-e "TERM=$TERM")
+fi
+if [ -n "${COLORTERM:-}" ]; then
+    TERMINAL_ENV+=(-e "COLORTERM=$COLORTERM")
+else
+    TERMINAL_ENV+=(-e COLORTERM=truecolor)
+fi
+
 podman run --rm -it \
     --network "$NET" \
     "${MOUNTS[@]}" \
+    "${TERMINAL_ENV[@]}" \
     -w /work \
-    -e "TERM=$TERM" \
     "$IMAGE" \
     lemon --zesty \
         --llama-url "http://$LLAMA_HOST:8080" \
