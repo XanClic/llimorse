@@ -1,6 +1,6 @@
 //! Helper object to manage streaming result
 
-use super::client::TokenUsage;
+use super::client::ClientState;
 use super::line_format::{AssistantMessage, CustomCall, FunctionCall, ToolCall, ToolCallParams};
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::Stream;
@@ -33,8 +33,8 @@ pub struct StreamingResult<S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     /// The actual full message after `[DONE]`
     full_message: Option<AssistantMessage>,
 
-    /// Token usage for the whole request
-    token_usage: Arc<TokenUsage>,
+    /// State of the client (which we change)
+    client_state: Arc<ClientState>,
 }
 
 /// In-construction message from the assistant to the user or system
@@ -157,14 +157,14 @@ struct StreamChoice {
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
     /// Read and parse the given input stream.
-    pub fn from_stream(stream: S, token_usage: &Arc<TokenUsage>) -> Self {
+    pub fn from_stream(stream: S, client_state: &Arc<ClientState>) -> Self {
         StreamingResult {
             stream: stream.into(),
             chunks: VecDeque::new(),
             done: false,
             constructing: Default::default(),
             full_message: None,
-            token_usage: Arc::clone(token_usage),
+            client_state: Arc::clone(client_state),
         }
     }
 
@@ -264,23 +264,29 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     /// Populates all of:
     /// - [`StreamingResult::chunks`]
     /// - [`StreamingResult::constructing`]
-    /// - [`StreamingResult::token_usage`] (if in the input)
+    /// - [`StreamingResult::client_state`] (if in the input)
     fn apply_chunk(&mut self, chunk: StreamChunk) -> Result<()> {
         for choice in chunk.choices {
-            self.token_usage
+            self.client_state
+                .token_usage
                 .streamed_tokens
                 .fetch_add(1, Ordering::Relaxed);
             self.choice_received(choice)?;
         }
 
         if let Some(u) = chunk.usage {
-            self.token_usage
+            self.client_state
+                .token_usage
                 .prompt_tokens
                 .store(u.prompt_tokens as usize, Ordering::Relaxed);
-            self.token_usage
+            self.client_state
+                .token_usage
                 .completion_tokens
                 .store(u.completion_tokens as usize, Ordering::Relaxed);
-            self.token_usage.streamed_tokens.store(0, Ordering::Relaxed);
+            self.client_state
+                .token_usage
+                .streamed_tokens
+                .store(0, Ordering::Relaxed);
         }
 
         Ok(())

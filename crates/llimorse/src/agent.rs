@@ -1,6 +1,6 @@
 //! Agent harness around an LLM client.
 
-use super::client::{Client, TokenUsage};
+use super::client::{Client, ClientState};
 use super::line_format::{
     AssistantMessage, ChatMessage, FunctionDefinition, SystemMessage, ToolCall, ToolCallParams,
     ToolChoiceMode, ToolDefinition, ToolResult, UserMessage,
@@ -335,19 +335,9 @@ impl Agent {
         }
     }
 
-    /// Return the token usage stat object
-    pub fn token_usage(&self) -> &Arc<TokenUsage> {
-        self.client.token_usage()
-    }
-
-    /// Return the name of the model in use
-    pub fn model_name(&self) -> &str {
-        self.client.model_name()
-    }
-
-    /// Return the number of tokens that fit into the context
-    pub fn context_size(&self) -> Option<usize> {
-        self.client.context_size()
+    /// Return the current client state object
+    pub fn client_state(&self) -> &Arc<ClientState> {
+        self.client.state()
     }
 }
 

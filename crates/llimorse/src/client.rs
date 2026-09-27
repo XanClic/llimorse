@@ -21,14 +21,21 @@ pub struct Client {
     /// Chat endpoint URL
     url: String,
 
-    /// Model to use
-    model: String,
+    /// The current general state of the client
+    state: Arc<ClientState>,
+}
+
+/// The current general state of a llama-server client (or, technically, slot)
+#[derive(Debug)]
+pub struct ClientState {
+    /// Model in use
+    pub model_name: String,
 
     /// Context size in tokens
-    context_size: Option<usize>,
+    pub context_size: Option<usize>,
 
     /// Token usage (how much of the context is used)
-    token_usage: Arc<TokenUsage>,
+    pub token_usage: TokenUsage,
 }
 
 /// Token counts from a completed chat request
@@ -113,9 +120,11 @@ impl Client {
         Ok(Client {
             http,
             url: format!("{base_url}/v1/chat/completions"),
-            model: model.id.clone(),
-            context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
-            token_usage: Default::default(),
+            state: Arc::new(ClientState {
+                model_name: model.id.clone(),
+                context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
+                token_usage: Default::default(),
+            }),
         })
     }
 
@@ -130,7 +139,7 @@ impl Client {
         tool_choice: T,
     ) -> Result<StreamingResult<impl Stream<Item = reqwest::Result<bytes::Bytes>> + use<T>>> {
         let request = ChatCompletion {
-            model: &self.model,
+            model: &self.state.model_name,
             messages,
             stream: true,
             stream_options: StreamOptions {
@@ -145,7 +154,7 @@ impl Client {
 
         Ok(StreamingResult::from_stream(
             response.bytes_stream(),
-            &self.token_usage,
+            &self.state,
         ))
     }
 
@@ -204,19 +213,9 @@ impl Client {
         Ok(response)
     }
 
-    /// Return the token usage stat object
-    pub fn token_usage(&self) -> &Arc<TokenUsage> {
-        &self.token_usage
-    }
-
-    /// Return the name of the model in use
-    pub fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    /// Return the number of tokens that fit into the context
-    pub fn context_size(&self) -> Option<usize> {
-        self.context_size
+    /// Return the current client state object
+    pub fn state(&self) -> &Arc<ClientState> {
+        &self.state
     }
 }
 

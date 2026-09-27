@@ -2,12 +2,10 @@
 
 use anyhow::anyhow;
 use llimorse::Agent;
-use llimorse::client::TokenUsage;
 use llimorse::line_format::{
     AssistantMessage, ChatMessage, ToolCallParams, ToolResult, UserMessage,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Type of a chat history entry (for formatting)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,9 +37,6 @@ pub enum HistoryEntryType {
 pub struct ChatHistory {
     /// Full chat history (split into lines, but not broken by terminal width)
     lines: Vec<(String, HistoryEntryType)>,
-
-    /// Token usage as last reported by the LLM
-    token_usage: Arc<TokenUsage>,
 
     /// Not-yet-resolved tool calls (for [`Self::push_raw()`])
     open_tool_calls: HashMap<String, ToolCallParams>,
@@ -123,11 +118,6 @@ impl ChatHistory {
     /// Return the chat history.
     pub fn lines(&self) -> &[(String, HistoryEntryType)] {
         &self.lines
-    }
-
-    /// Return the best-known token usage
-    pub fn token_usage(&self) -> &Arc<TokenUsage> {
-        &self.token_usage
     }
 
     /// Append the given string of type `ct` to the history.
