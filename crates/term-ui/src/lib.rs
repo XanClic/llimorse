@@ -351,10 +351,10 @@ impl TermUi {
 
         let mut layout = Vec::with_capacity(self.queued_prompts.len() + 2);
         layout.push(Constraint::Percentage(100));
-        for _ in 0..self.queued_prompts.len() {
-            layout.push(Constraint::Min(1));
-        }
         if let Some(input_outer_height) = input_outer_height {
+            for _ in 0..self.queued_prompts.len() {
+                layout.push(Constraint::Min(1));
+            }
             layout.push(Constraint::Min(input_outer_height));
         }
 
@@ -452,18 +452,18 @@ impl TermUi {
             }),
             &mut scrollbar_state,
         );
-        for (i, p) in self.queued_prompts.iter().enumerate() {
-            let line = Line {
-                style: Style::new().white().on_blue(),
-                alignment: None,
-                spans: vec![Span {
-                    style: Default::default(),
-                    content: p.into(),
-                }],
-            };
-            frame.render_widget(line, layout[i + 1]);
-        }
         if let Some(input_cell) = input_cell {
+            for (i, p) in self.queued_prompts.iter().enumerate() {
+                let line = Line {
+                    style: Style::new().white().on_blue(),
+                    alignment: None,
+                    spans: vec![Span {
+                        style: Default::default(),
+                        content: p.into(),
+                    }],
+                };
+                frame.render_widget(line, layout[i + 1]);
+            }
             self.input_area
                 .set_block(Self::input_block(self.processing));
             frame.render_widget(&self.input_area, input_cell);
