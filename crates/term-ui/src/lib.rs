@@ -44,23 +44,11 @@ pub struct TermUi {
     /// `term` stored here.)
     term: Option<DefaultTerminal>,
 
-    /// Immutable client information
-    client_info: ClientInfo,
-
-    /// The current general state of the client
-    client_state: Arc<RwLock<ClientState>>,
-
     /// Produces terminal events, asynchronously
     events: ct::EventStream,
 
-    /// The chat history as shared with the agent
-    chat_history: Arc<Mutex<ChatHistory>>,
-
-    /// First line of the chat history to show (`usize::MAX` to follow the tail)
-    history_scroll: Saturating<usize>,
-
-    /// How many lines (elements of `chat_history`) are visible on screen right now
-    history_lines_on_screen: usize,
+    /// All agents currently running
+    agents: UiAgents,
 
     /// User message input widget
     input_area: ratatui_textarea::TextArea<'static>,
@@ -75,6 +63,33 @@ pub struct TermUi {
 
     /// When the object was created, purely for visual purposes
     creation: Instant,
+}
+
+/// Data for the agents currently running
+struct UiAgents {
+    /// State of the agents
+    state: Vec<AgentState>,
+
+    /// Which agent is being viewed
+    active_agent: usize,
+}
+
+/// Overall state for an agent (main agent or subagent), including its view
+struct AgentState {
+    /// Immutable client information
+    client_info: ClientInfo,
+
+    /// The current general state of the agent’s client
+    client_state: Arc<RwLock<ClientState>>,
+
+    /// The chat history as shared with the agent
+    history: Arc<Mutex<ChatHistory>>,
+
+    /// First line of the chat history to show (`usize::MAX` to follow the tail)
+    scroll: Saturating<usize>,
+
+    /// How many lines (elements of `chat_history`) are visible on screen right now
+    lines_on_screen: usize,
 }
 
 impl TermUi {
@@ -94,12 +109,12 @@ impl TermUi {
 
         TermUi {
             term: Some(term),
-            client_info: agent.client_info().clone(),
-            client_state: agent.client_state_arc(),
             events: ct::EventStream::new(),
-            chat_history,
-            history_scroll: Saturating(usize::MAX),
-            history_lines_on_screen: 0,
+            agents: UiAgents::new(
+                agent.client_state_arc(),
+                agent.client_info().clone(),
+                chat_history,
+            ),
             input_area,
             queued_prompts: VecDeque::new(),
             pending_permissions: VecDeque::new(),
@@ -118,23 +133,25 @@ impl TermUi {
         Ok(())
     }
 
-    /// Scroll the chat history window up by the given number of lines.
+    /// Scroll the active view up by the given number of lines.
     fn scroll_up(&mut self, lines: usize) {
-        let history_len = self.chat_history.lock().unwrap().lines().len();
+        let agent = self.agents.active_mut();
+        let history_len = agent.history.lock().unwrap().lines().len();
 
-        if self.history_scroll.0 == usize::MAX {
-            self.history_scroll.0 = history_len.saturating_sub(self.history_lines_on_screen);
+        if agent.scroll.0 == usize::MAX {
+            agent.scroll.0 = history_len.saturating_sub(agent.lines_on_screen);
         }
-        self.history_scroll -= lines;
+        agent.scroll -= lines;
     }
 
-    /// Scroll the chat history window down by the given number of lines.
+    /// Scroll the active view down by the given number of lines.
     fn scroll_down(&mut self, lines: usize) {
-        let history_len = self.chat_history.lock().unwrap().lines().len();
+        let agent = self.agents.active_mut();
+        let history_len = agent.history.lock().unwrap().lines().len();
 
-        self.history_scroll += lines;
-        if self.history_scroll.0 >= history_len.saturating_sub(self.history_lines_on_screen) {
-            self.history_scroll.0 = usize::MAX;
+        agent.scroll += lines;
+        if agent.scroll.0 >= history_len.saturating_sub(agent.lines_on_screen) {
+            agent.scroll.0 = usize::MAX;
         }
     }
 
@@ -173,11 +190,11 @@ impl TermUi {
                 ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
 
                 ct::KeyCode::PageUp => {
-                    self.scroll_up(self.history_lines_on_screen.div_ceil(2));
+                    self.scroll_up(self.agents.active().lines_on_screen.div_ceil(2));
                     return Ok(None);
                 }
                 ct::KeyCode::PageDown => {
-                    self.scroll_down(self.history_lines_on_screen.div_ceil(2));
+                    self.scroll_down(self.agents.active().lines_on_screen.div_ceil(2));
                     return Ok(None);
                 }
 
@@ -244,21 +261,21 @@ impl TermUi {
         let history_cell = layout[0];
         let input_cell = layout[self.queued_prompts.len() + 1];
 
-        let chat_history = self.chat_history.lock().unwrap();
+        let agent = self.agents.active_mut();
+        let chat_history = agent.history.lock().unwrap();
         let history_line_count = history_cell.height.saturating_sub(2) as usize;
         let history_width = history_cell.width.saturating_sub(2) as usize;
 
-        let mut history_lines_on_screen = 0;
-        let scroll = self.history_scroll.0;
+        let mut lines_on_screen = 0;
 
-        let history_lines = if scroll == usize::MAX {
+        let history_lines = if agent.scroll.0 == usize::MAX {
             let mut history_lines = history_into_ratatui_lines(
                 chat_history
                     .lines()
                     .iter()
                     .rev()
                     .flat_map(|line| {
-                        history_lines_on_screen += 1; // diabolical
+                        lines_on_screen += 1; // diabolical
                         textwrap::wrap(&line.0, history_width)
                             .into_iter()
                             .rev()
@@ -273,9 +290,9 @@ impl TermUi {
                 chat_history
                     .lines()
                     .iter()
-                    .skip(scroll)
+                    .skip(agent.scroll.0)
                     .flat_map(|line| {
-                        history_lines_on_screen += 1; // diabolical
+                        lines_on_screen += 1; // diabolical
                         textwrap::wrap(&line.0, history_width)
                             .into_iter()
                             .map(|l| (l, line.1))
@@ -284,7 +301,7 @@ impl TermUi {
             )
         };
 
-        self.history_lines_on_screen = history_lines_on_screen;
+        agent.lines_on_screen = lines_on_screen;
 
         let paragraph_content = Text {
             alignment: None,
@@ -294,22 +311,15 @@ impl TermUi {
 
         let paragraph = Paragraph::new(paragraph_content).block(
             Block::bordered()
-                .title(format!(
-                    " {} ",
-                    AgentStatsDisplay {
-                        state: &self.client_state,
-                        info: &self.client_info,
-                        time_ref: self.creation,
-                    }
-                ))
+                .title(format!(" {} ", agent.stats(self.creation)))
                 .title_style(Style::new().bold()),
         );
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         let history_len = chat_history.lines().len();
-        let scroll_len = history_len.saturating_sub(history_lines_on_screen);
+        let scroll_len = history_len.saturating_sub(lines_on_screen);
         let mut scrollbar_state =
-            ScrollbarState::new(scroll_len).position(cmp::min(scroll, scroll_len));
+            ScrollbarState::new(scroll_len).position(cmp::min(agent.scroll.0, scroll_len));
 
         frame.render_widget(paragraph, history_cell);
         frame.render_stateful_widget(
@@ -471,6 +481,57 @@ fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
         HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
         HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
         HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
+    }
+}
+
+impl UiAgents {
+    /// Create a new collection of agents, with a single agent
+    fn new(
+        main_client_state: Arc<RwLock<ClientState>>,
+        main_client_info: ClientInfo,
+        main_history: Arc<Mutex<ChatHistory>>,
+    ) -> Self {
+        UiAgents {
+            state: vec![AgentState {
+                client_state: main_client_state,
+                client_info: main_client_info,
+                history: main_history,
+                scroll: Saturating(usize::MAX),
+                lines_on_screen: 0,
+            }],
+            active_agent: 0,
+        }
+    }
+
+    /// Return the currently active view’s agent
+    fn active(&self) -> &AgentState {
+        self.state
+            .get(self.active_agent)
+            .or_else(|| self.state.first())
+            .expect("No agents left")
+    }
+
+    /// Return the currently active view’s agent, mutably
+    fn active_mut(&mut self) -> &mut AgentState {
+        if let Some(state) = self.state.get_mut(self.active_agent) {
+            state
+        } else {
+            self.state.first_mut().expect("No agents left")
+        }
+    }
+}
+
+impl AgentState {
+    /// Format the client-state statistics that appear in the history pane title: model name,
+    /// operation stage, and context usage (including live prefill progress).
+    ///
+    /// `time_ref` is an arbitrary (but fixed) point in time so we can animate spinners.
+    fn stats(&self, time_ref: Instant) -> impl fmt::Display {
+        AgentStatsDisplay {
+            state: &self.client_state,
+            info: &self.client_info,
+            time_ref,
+        }
     }
 }
 
