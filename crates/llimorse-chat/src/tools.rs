@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 /// the UI sends the user's decision back across the request's oneshot channel. If the UI is
 /// dropped before a decision is made (e.g. the application exits while a prompt is pending),
 /// the request is treated as a rejection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UserToolGate {
     /// The UI-notification channel to send permission requests across.
     notifications: mpsc::UnboundedSender<ui::Notification>,
