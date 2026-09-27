@@ -1,5 +1,7 @@
 //! UI connector for llimorse-chat UIs
 
+use tokio::sync::mpsc;
+
 /// UI state for interacting with the llimorse-chat application
 #[allow(async_fn_in_trait)]
 pub trait UiState {
@@ -27,7 +29,7 @@ pub enum Event {
 }
 
 /// Notifications to the UI
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Notification {
     /// Exit requested
     Exit,
@@ -40,4 +42,50 @@ pub enum Notification {
 
     /// User message has been submitted to the LLM
     PromptSubmitted,
+
+    /// A tool call is requesting permission from the user
+    RequestPermission {
+        /// The prompt displayed to the user
+        prompt: String,
+
+        /// The user's decision, to be sent back across this channel
+        approval: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    },
+}
+
+/// A handle to the UI-notification channel, which can be created before [`App`].
+///
+/// The sender side is cloneable, so it can be shared with objects that are created before the
+/// application, such as [`UserToolGate`]. [`App::new()`] consumes this object, taking the
+/// receiver side into itself.
+pub struct NotificationChannel {
+    /// The sender side (cloneable)
+    sender: mpsc::UnboundedSender<Notification>,
+
+    /// The receiver side (consumed by [`App`])
+    receiver: mpsc::UnboundedReceiver<Notification>,
+}
+
+impl Default for NotificationChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NotificationChannel {
+    /// Create a new UI-notification channel.
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self { sender, receiver }
+    }
+
+    /// Clone the sender, for objects that need to notify the UI.
+    pub fn sender(&self) -> mpsc::UnboundedSender<Notification> {
+        self.sender.clone()
+    }
+
+    /// For [`App::new()`]: Consume and get the receiving end
+    pub(crate) fn into_receiver(self) -> mpsc::UnboundedReceiver<Notification> {
+        self.receiver
+    }
 }

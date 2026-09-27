@@ -13,10 +13,13 @@ use llimorse::agent::AgentStage;
 use llimorse::client::ClientState;
 use llimorse_chat::history::HistoryEntryType;
 use llimorse_chat::{ChatHistory, ui};
-use ratatui::layout::{Alignment, Constraint, Layout, Margin};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
-use ratatui::text::Text;
-use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{
+    Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -25,6 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, io};
+use tokio::sync::oneshot;
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
 static TERM_SET_UP: AtomicUsize = AtomicUsize::new(0);
@@ -60,6 +64,11 @@ pub struct TermUi {
     /// Messages that are queued for sending
     queued_prompts: VecDeque<String>,
 
+    /// Tool calls awaiting a permission decision from the user, oldest first.
+    ///
+    /// Only the first one is shown; the rest wait their turn.
+    pending_permissions: VecDeque<(String, oneshot::Sender<std::result::Result<(), String>>)>,
+
     /// When the object was created, purely for visual purposes
     creation: Instant,
 }
@@ -88,6 +97,7 @@ impl TermUi {
             history_lines_on_screen: 0,
             input_area,
             queued_prompts: VecDeque::new(),
+            pending_permissions: VecDeque::new(),
             creation: Instant::now(),
         }
     }
@@ -125,6 +135,19 @@ impl TermUi {
 
     /// Handle the given keyboard event.
     fn handle_key_event(&mut self, event: ct::KeyEvent) -> Result<Option<ui::Event>> {
+        if event.kind == ct::KeyEventKind::Press && !self.pending_permissions.is_empty() {
+            // A permission request is on screen: it is modal. Enter approves, Esc denies, all
+            // other keys are ignored.
+            let decision: std::result::Result<(), String> = match event.code {
+                ct::KeyCode::Enter if event.modifiers.is_empty() => Ok(()),
+                ct::KeyCode::Esc => Err("denied by user".to_string()),
+                _ => return Ok(None),
+            };
+            let (_, approval) = self.pending_permissions.pop_front().unwrap();
+            let _ = approval.send(decision);
+            return Ok(None);
+        }
+
         if event.kind == ct::KeyEventKind::Press {
             match event.code {
                 ct::KeyCode::Enter if event.modifiers.is_empty() => {
@@ -302,10 +325,10 @@ impl TermUi {
             &mut scrollbar_state,
         );
         for (i, p) in self.queued_prompts.iter().enumerate() {
-            let line = ratatui::text::Line {
+            let line = Line {
                 style: Style::new().white().on_blue(),
                 alignment: None,
-                spans: vec![ratatui::text::Span {
+                spans: vec![Span {
                     style: Default::default(),
                     content: p.into(),
                 }],
@@ -313,6 +336,41 @@ impl TermUi {
             frame.render_widget(line, layout[i + 1]);
         }
         frame.render_widget(&self.input_area, input_cell);
+
+        // Render the permission popup last, so that it occludes the main layout.
+        if let Some((prompt, _)) = self.pending_permissions.front() {
+            TermUi::render_permission_popup(frame, area, prompt);
+        }
+    }
+
+    /// Render the given permission request as a popup centered on the screen, on top of the main
+    /// layout.
+    ///
+    /// The popup is 80% of the terminal’s width (at most) and as tall as its wrapped prompt
+    /// requires (at most the terminal’s height), and clears the area it covers, so that nothing
+    /// from the main layout shows through.
+    fn render_permission_popup(frame: &mut Frame, area: Rect, prompt: &str) {
+        let width = (area.width.saturating_mul(8) / 10).max(4).min(area.width);
+        let inner_width = width.saturating_sub(2).max(1); // account for the border
+
+        let block = Block::bordered()
+            .border_style(Style::new().yellow())
+            .border_type(BorderType::Thick)
+            .title(" Tool permission requested ")
+            .title_style(Style::new().white().bold())
+            .title_bottom(Line::from(" [Enter: allow]  [Esc: deny] ").right_aligned())
+            .padding(Padding::proportional(1));
+        let paragraph = Paragraph::new(prompt)
+            .wrap(Wrap { trim: true })
+            .block(block);
+        let height = paragraph
+            .line_count(inner_width)
+            .min(area.height as usize)
+            .max(1) as u16;
+
+        let popup_area = area.centered(Constraint::Length(width), Constraint::Length(height));
+        frame.render_widget(Clear, popup_area); // clear what is underneath
+        frame.render_widget(paragraph, popup_area);
     }
 
     /// Return a representative emoji of the current stage, animated
@@ -378,6 +436,9 @@ impl ui::UiState for TermUi {
             ui::Notification::PromptSubmitted => {
                 self.queued_prompts.pop_front();
             }
+            ui::Notification::RequestPermission { prompt, approval } => {
+                self.pending_permissions.push_back((prompt, approval));
+            }
         }
 
         self.draw()
@@ -418,14 +479,14 @@ fn tear_down_term() {
 /// ratatui lines.
 fn history_into_ratatui_lines<'a, I: Iterator<Item = (Cow<'a, str>, HistoryEntryType)>>(
     iter: I,
-) -> Vec<ratatui::text::Line<'a>> {
+) -> Vec<Line<'a>> {
     iter.map(|line| {
         let (style, alignment) = ratatui_style(line.1);
 
-        ratatui::text::Line {
+        Line {
             style,
             alignment: Some(alignment),
-            spans: vec![ratatui::text::Span {
+            spans: vec![Span {
                 style: Default::default(),
                 content: line.0,
             }],
@@ -444,5 +505,80 @@ fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
         HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
         HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
         HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// Draw a busy background and the permission popup for the given prompt, and return the
+    /// resulting screen as lines of symbols.
+    fn screen_with_popup(width: u16, height: u16, prompt: &str) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let frame = terminal
+            .draw(|frame| {
+                let background = vec![Line::from("x".repeat(width as usize)); height as usize];
+                frame.render_widget(Paragraph::new(background), frame.area());
+                TermUi::render_permission_popup(frame, frame.area(), prompt);
+            })
+            .unwrap();
+        frame
+            .buffer
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn popup_is_centered_and_opaque() {
+        // 60x20 terminal: the popup is 48 wide (80%) and 5 tall (one prompt line plus thick border
+        // and proportional padding), at (6, 8) (the layout solver gives the leftover row to the top
+        // when centering).
+        let title = " Tool permission requested ";
+        let hint = " [Enter: allow]  [Esc: deny] ";
+        let mut expected = vec!["x".repeat(60); 20];
+        expected[8] = format!(
+            "{}┏{}{}┓{}",
+            "x".repeat(6),
+            title,
+            "━".repeat(46 - 27),
+            "x".repeat(6)
+        );
+        expected[9] = format!("{}┃{}┃{}", "x".repeat(6), " ".repeat(46), "x".repeat(6));
+        expected[10] = format!(
+            "{}┃  {}{}┃{}",
+            "x".repeat(6),
+            "echo hello",
+            " ".repeat(46 - 12),
+            "x".repeat(6)
+        );
+        expected[11] = format!("{}┃{}┃{}", "x".repeat(6), " ".repeat(46), "x".repeat(6));
+        expected[12] = format!(
+            "{}┗{}{}┛{}",
+            "x".repeat(6),
+            "━".repeat(46 - 29),
+            hint,
+            "x".repeat(6)
+        );
+
+        assert_eq!(screen_with_popup(60, 20, "echo hello"), expected);
+    }
+
+    #[test]
+    fn popup_does_not_panic_on_small_terminals() {
+        // A prompt that would be far too large for the terminal must be clamped, not panic.
+        let prompt = "x".repeat(1000);
+        for (width, height) in [(12u16, 6), (4u16, 3), (1u16, 1)] {
+            let screen = screen_with_popup(width, height, &prompt);
+            assert_eq!(screen.len(), height as usize);
+        }
+
+        let screen = screen_with_popup(12, 6, &prompt);
+        assert!(screen[0].contains('┏') && screen[0].contains('┓'));
+        assert!(screen[5].contains('┗') && screen[5].contains('┛'));
     }
 }

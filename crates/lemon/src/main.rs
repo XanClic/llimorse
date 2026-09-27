@@ -126,11 +126,17 @@ async fn main() -> Result<()> {
         agent.push_system(system_prompt);
     }
 
+    let ui_notifications = llimorse_chat::ui::NotificationChannel::new();
+
     agent.add_tool(llimorse_tools::View::new());
     agent.add_tool(llimorse_tools::Write::new());
     agent.add_tool(llimorse_tools::Edit::new());
     if args.zesty {
         agent.add_tool(llimorse_tools::Bash::new(llimorse_tools::AutoApprove));
+    } else {
+        agent.add_tool(llimorse_tools::Bash::new(llimorse_chat::UserToolGate::new(
+            &ui_notifications,
+        )));
     }
 
     if let Some(searxng_url) = &args.searxng_url {
@@ -150,10 +156,12 @@ async fn main() -> Result<()> {
         ));
     }
 
-    let mut app =
-        llimorse_chat::App::new_with_history(agent, &manager.history, |agent, history| {
-            Ok(TermUi::new(agent, history))
-        })?;
+    let mut app = llimorse_chat::App::new_with_history(
+        agent,
+        &manager.history,
+        ui_notifications,
+        |agent, history| Ok(TermUi::new(agent, history)),
+    )?;
 
     app.run().await
 }

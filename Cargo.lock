@@ -1489,6 +1489,7 @@ dependencies = [
  "clap",
  "futures",
  "llimorse",
+ "llimorse-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -2817,6 +2818,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "textwrap",
+ "tokio",
  "unicode-segmentation",
  "unicode-width",
 ]

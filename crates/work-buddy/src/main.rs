@@ -192,10 +192,12 @@ async fn main() -> Result<()> {
         now.to_rfc3339_opts(SecondsFormat::Secs, false)
     ));
 
-    let mut app =
-        llimorse_chat::App::new_with_history(agent, &manager.history, |agent, history| {
-            Ok(TermUi::new(agent, history))
-        })?;
+    let mut app = llimorse_chat::App::new_with_history(
+        agent,
+        &manager.history,
+        llimorse_chat::ui::NotificationChannel::new(),
+        |agent, history| Ok(TermUi::new(agent, history)),
+    )?;
 
     app.run().await
 }

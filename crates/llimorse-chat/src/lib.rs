@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod history;
 pub mod log;
+pub mod tools;
 pub mod ui;
 
 use agent::ChatAgent;
@@ -18,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
+pub use tools::UserToolGate;
 pub use ui::UiState;
 
 /// The application state
@@ -40,6 +42,7 @@ impl<I: UiState> App<I> {
     pub fn new_with_history<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
         mut agent: Agent,
         history: &[ChatMessage],
+        ui_notifications: ui::NotificationChannel,
         create_ui: F,
     ) -> Result<Self> {
         let mut chat_history = ChatHistory::default();
@@ -53,7 +56,7 @@ impl<I: UiState> App<I> {
         let ui = create_ui(&agent, Arc::clone(&chat_history))?;
 
         let (agent_notifications, recv_agent_notifications) = mpsc::unbounded_channel();
-        let (send_ui_notifications, ui_notifications) = mpsc::unbounded_channel();
+        let ui_notification_sender = ui_notifications.sender();
 
         let agent_thread = thread::spawn({
             move || {
@@ -65,7 +68,7 @@ impl<I: UiState> App<I> {
                         let mut wba = ChatAgent::new(
                             chat_history,
                             recv_agent_notifications,
-                            Arc::new(send_ui_notifications),
+                            Arc::new(ui_notification_sender),
                         );
                         if let Err(err) = wba.run(agent).await {
                             panic!("Agent error: {err}");
@@ -80,16 +83,17 @@ impl<I: UiState> App<I> {
             ui,
 
             agent_notifications,
-            ui_notifications,
+            ui_notifications: ui_notifications.into_receiver(),
         })
     }
 
     /// Create a new application state around `agent`.
     pub fn new<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
         agent: Agent,
+        ui_notifications: ui::NotificationChannel,
         create_ui: F,
     ) -> Result<Self> {
-        Self::new_with_history(agent, &[], create_ui)
+        Self::new_with_history(agent, &[], ui_notifications, create_ui)
     }
 
     /// Run the application until it finds it should exit.
@@ -106,7 +110,7 @@ impl<I: UiState> App<I> {
                 result = self.ui.get_event().fuse() => result.map(Some).map_err(Into::into),
                 notification = time::timeout(redraw_min_time, self.ui_notifications.recv()).fuse() => {
                     if let Ok(Some(notification)) = notification {
-                        let exit = notification == ui::Notification::Exit;
+                        let exit = matches!(notification, ui::Notification::Exit);
                         self.ui.notify(notification).map_err(Into::into)?;
                         if exit {
                             // TODO: Fix this, it's a bit of a hack here

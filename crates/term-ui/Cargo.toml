@@ -13,5 +13,6 @@ llimorse-chat.workspace = true
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = "0.9"
 textwrap = "0.16"
+tokio = { workspace = true, features = ["sync"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
