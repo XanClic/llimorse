@@ -59,6 +59,10 @@ derive_merge! {
         /// Raw session log to resume from
         #[arg(long)]
         resume: Option<PathBuf>,
+
+        /// Auto-approve all tool calls
+        #[arg(long)]
+        zesty: bool,
     }
 }
 
@@ -134,6 +138,9 @@ async fn main() -> Result<()> {
     agent.add_tool(llimorse::tools::View::new());
     agent.add_tool(llimorse::tools::Write::new());
     agent.add_tool(llimorse::tools::Edit::new());
+    if args.zesty {
+        agent.add_tool(llimorse::tools::Bash::new(llimorse::tools::AutoApprove));
+    }
 
     if let Some(searxng_url) = &args.searxng_url {
         agent.add_tool(llimorse::tools::WebSearch::new(searxng_url));

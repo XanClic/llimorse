@@ -24,6 +24,9 @@ pub use streaming_result::StreamingChunk;
 /// a JSON object, which is what tool calls expect.  The `'result` and `'state` structs may have
 /// any shape: named fields, a tuple body, or no body at all.
 ///
+/// The `'state` struct may additionally be generic (e.g. `Bash<G: ToolGate>`), in which case the
+/// generated [`Tool`](agent::Tool) and [`ToolState`](agent::ToolState) impls are generic as well.
+///
 /// For empty parameters or results, prefer `{}` over a unit struct: a unit struct serializes as
 /// `null` (and its schema is `"type": "null"`), which an LLM may read as an error indicator,
 /// while `{}` reads as “fine, but empty”.
@@ -45,7 +48,10 @@ macro_rules! tool {
         'result: $result_vis:vis struct $result_name:ident $result_body:tt $(;)?
 
         $(#[$state_attr:meta])*
-        'state: $state_vis:vis struct $type_name:ident $state_body:tt $(;)?
+        'state: $state_vis:vis struct $type_name:ident
+            $(<$($state_param:ident $(: $state_bound:path)?),*>)?
+            $({ $($state_body:tt)* })?
+            $(( $($state_unit:tt)* ))?
     ) => {
         #[doc = $desc]
         $(#[$attr])*
@@ -65,10 +71,15 @@ macro_rules! tool {
 
         $crate::__tool_struct! {
             $(#[$state_attr])*
-            $state_vis struct $type_name $state_body
+            $state_vis struct $type_name
+                $(<$($state_param $(: $state_bound)?),*>)?
+                $({ $($state_body)* })?
+                $(( $($state_unit)* ))?
         }
 
-        impl $crate::agent::Tool for $type_name {
+        impl $(<$($state_param $(: $state_bound)?),*>)? $crate::agent::Tool for
+                $type_name $(<$($state_param),*>)?
+        {
             fn name(&self) -> String {
                 $name.into()
             }
@@ -119,7 +130,9 @@ macro_rules! tool {
             }
         }
 
-        impl $crate::agent::ToolState for $type_name {
+        impl $(<$($state_param $(: $state_bound)?),*>)? $crate::agent::ToolState for
+                $type_name $(<$($state_param),*>)?
+        {
             type ParamType = $param_name;
             type ResultType = $result_name;
         }
@@ -130,31 +143,44 @@ macro_rules! tool {
 ///
 /// Implementation detail of [`tool!`]: that macro takes the `'result` and `'state` struct bodies
 /// opaquely, so it needs a helper to re-emit them in the right form (a tuple struct needs a
-/// trailing semicolon, a braced one must not have one).
+/// trailing semicolon, a braced one must not have one). The struct may carry generic parameters
+/// (e.g. `<G: ToolGate>`), which are re-emitted verbatim.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __tool_struct {
     (
         $(#[$attr:meta])*
-        $vis:vis struct $name:ident { $($body:tt)* }
+        $vis:vis struct $name:ident
+            $(< $($param:ident $(: $bound:path)?),* >)?
+            { $($body:tt)* }
     ) => {
         $(#[$attr])*
-        $vis struct $name { $($body)* }
+        $vis struct $name
+            $(< $($param $(: $bound)?),* >)?
+            { $($body)* }
     };
 
     (
         $(#[$attr:meta])*
-        $vis:vis struct $name:ident($($body:tt)*)
+        $vis:vis struct $name:ident
+            $(< $($param:ident $(: $bound:path)?),* >)?
+            ( $($body:tt)* )
     ) => {
         $(#[$attr])*
-        $vis struct $name($($body)*);
+        $vis struct $name
+            $(< $($param $(: $bound)?),* >)?
+            ( $($body)* );
     };
 
     (
         $(#[$attr:meta])*
-        $vis:vis struct $name:ident;
+        $vis:vis struct $name:ident
+            $(< $($param:ident $(: $bound:path)?),* >)?
+            ;
     ) => {
         $(#[$attr])*
-        $vis struct $name;
+        $vis struct $name
+            $(<$($param $(: $bound)?),* >)?
+            ;
     };
 }
