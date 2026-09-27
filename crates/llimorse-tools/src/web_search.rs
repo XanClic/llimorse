@@ -1,12 +1,12 @@
 //! A web_search tool using SearXNG
 
-use crate::CallableTool;
 use anyhow::{Context, Result, anyhow};
+use llimorse::CallableTool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
-crate::tool! {
+llimorse::tool! {
     'name: "web_search";
 
     /// Look up information on the web. Returns the top results with titles, URLs, and snippets.

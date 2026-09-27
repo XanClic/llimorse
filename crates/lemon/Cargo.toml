@@ -10,6 +10,7 @@ clap.workspace = true
 helpers.workspace = true
 llimorse.workspace = true
 llimorse-chat = { workspace = true, features = ["clap"] }
+llimorse-tools.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -126,15 +126,15 @@ async fn main() -> Result<()> {
         agent.push_system(system_prompt);
     }
 
-    agent.add_tool(llimorse::tools::View::new());
-    agent.add_tool(llimorse::tools::Write::new());
-    agent.add_tool(llimorse::tools::Edit::new());
+    agent.add_tool(llimorse_tools::View::new());
+    agent.add_tool(llimorse_tools::Write::new());
+    agent.add_tool(llimorse_tools::Edit::new());
     if args.zesty {
-        agent.add_tool(llimorse::tools::Bash::new(llimorse::tools::AutoApprove));
+        agent.add_tool(llimorse_tools::Bash::new(llimorse_tools::AutoApprove));
     }
 
     if let Some(searxng_url) = &args.searxng_url {
-        agent.add_tool(llimorse::tools::WebSearch::new(searxng_url));
+        agent.add_tool(llimorse_tools::WebSearch::new(searxng_url));
     }
 
     // Push the current time and date

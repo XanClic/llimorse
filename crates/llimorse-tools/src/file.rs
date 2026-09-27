@@ -1,14 +1,14 @@
 //! File tools.
 
-use crate::CallableTool;
 use anyhow::{Result, anyhow, bail};
 use helpers::TruncatedDisplay;
+use llimorse::CallableTool;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read as _, Seek as _, Write as _};
 use std::path::PathBuf;
 
-crate::tool! {
+llimorse::tool! {
     'name: "view";
 
     /// Read the given file, in whole or in part.
@@ -111,7 +111,7 @@ impl CallableTool for View {
     }
 }
 
-crate::tool! {
+llimorse::tool! {
     'name: "write";
 
     /// Overwrite a file in full.
@@ -188,7 +188,7 @@ impl CallableTool for Write {
     }
 }
 
-crate::tool! {
+llimorse::tool! {
     'name: "edit";
 
     /// Substitute a string in a file

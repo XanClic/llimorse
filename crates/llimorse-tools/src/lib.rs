@@ -1,4 +1,4 @@
-//! Example tools to be made available to harnesses written with llimorse
+//! Basic set of tools to be made available to harnesses written with llimorse
 
 pub mod bash;
 pub mod file;

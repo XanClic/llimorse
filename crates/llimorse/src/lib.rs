@@ -8,7 +8,6 @@ pub mod client;
 pub mod line_format;
 pub mod prefill_instructions;
 pub mod streaming_result;
-pub mod tools;
 
 pub use agent::{Agent, CallableTool, ChatListener};
 pub use client::Client;

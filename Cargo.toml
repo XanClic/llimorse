@@ -5,6 +5,7 @@ members = [
     "crates/lemon",
     "crates/llimorse",
     "crates/llimorse-chat",
+    "crates/llimorse-tools",
     "crates/term-ui",
     "crates/work-buddy",
 ]
@@ -17,6 +18,7 @@ edition = "2024"
 helpers = { path = "crates/helpers" }
 llimorse = { path = "crates/llimorse" }
 llimorse-chat = { path = "crates/llimorse-chat" }
+llimorse-tools = { path = "crates/llimorse-tools" }
 term-ui = { path = "crates/term-ui" }
 anyhow = "1"
 atomic = "0.6"

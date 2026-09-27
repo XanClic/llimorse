@@ -1,15 +1,15 @@
 //! Process execution tools.
 
 use super::ToolGate;
-use crate::CallableTool;
 use anyhow::{Result, anyhow};
 use helpers::TruncatedDisplay;
+use llimorse::CallableTool;
 use std::fmt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 
-crate::tool! {
+llimorse::tool! {
     'name: "bash";
 
     /// Execute the given command line through a shell.

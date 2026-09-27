@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
         agent.push_system(system_prompt);
     }
 
-    agent.add_tool(llimorse::tools::WebSearch::new(
+    agent.add_tool(llimorse_tools::WebSearch::new(
         args.searxng_url.as_deref().unwrap_or(SEARXNG_URL_DEFAULT),
     ));
 

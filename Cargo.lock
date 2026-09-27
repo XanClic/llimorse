@@ -1413,6 +1413,7 @@ dependencies = [
  "helpers",
  "llimorse",
  "llimorse-chat",
+ "llimorse-tools",
  "schemars",
  "serde",
  "serde_json",
@@ -1470,7 +1471,6 @@ dependencies = [
  "bytemuck",
  "bytes",
  "futures",
- "helpers",
  "pin-project",
  "reqwest",
  "schemars",
@@ -1478,7 +1478,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]
@@ -1494,6 +1493,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "llimorse-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "helpers",
+ "llimorse",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "urlencoding",
 ]
 
 [[package]]
@@ -3712,6 +3725,7 @@ dependencies = [
  "helpers",
  "llimorse",
  "llimorse-chat",
+ "llimorse-tools",
  "schemars",
  "serde",
  "serde_json",
