@@ -144,6 +144,9 @@ impl<I: UiState> App<I> {
                             .agent_notifications
                             .send(agent::Notification::ForceSubmitQueued);
                     }
+                    ui::Event::Continue => {
+                        let _ = self.agent_notifications.send(agent::Notification::Continue);
+                    }
                 }
             }
         }

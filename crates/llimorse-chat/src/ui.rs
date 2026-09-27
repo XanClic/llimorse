@@ -31,6 +31,9 @@ pub enum Event {
 
     /// Force submitting all queued prompts *right now*
     ForceSubmitQueued,
+
+    /// Submit the current state without a new user message (e.g. continue a resumed session)
+    Continue,
 }
 
 /// ID of a subagent, unique within one application

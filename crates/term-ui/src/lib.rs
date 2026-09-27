@@ -208,10 +208,9 @@ impl TermUi {
                         } else if !self.queued_prompts.is_empty() {
                             return Ok(Some(ui::Event::ForceSubmitQueued));
                         } else {
-                            // Ignore Enter without modifier keys that does not mean a submit
-                            // (i.e., when the field is empty, do not allow empty to create a
-                            // newline, instead just ignore it)
-                            return Ok(None);
+                            // Empty input: submit the current state. The agent thread ignores this
+                            // unless the history tops out on a tool result or a user message.
+                            return Ok(Some(ui::Event::Continue));
                         }
                     } else {
                         // Do not do anything unless we’re in the main agent view

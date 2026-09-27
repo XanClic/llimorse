@@ -46,6 +46,10 @@ pub(super) enum Notification {
 
     /// Force submitting all queued prompts *right now*
     ForceSubmitQueued,
+
+    /// Submit the current state without a new user message (e.g. continue a resumed
+    /// session)
+    Continue,
 }
 
 impl ChatAgent {
@@ -74,7 +78,7 @@ impl ChatAgent {
         result
     }
 
-    /// Process incoming notifications until finding a user or exit message.
+    /// Process incoming notifications until finding a prompt, a continue, or an exit.
     ///
     /// Return `false` if the channel is closed (or an exit event is received).
     ///
@@ -91,6 +95,8 @@ impl ChatAgent {
                     incoming.queued_messages.push_back(p);
                     return true;
                 }
+
+                Notification::Continue => return true,
 
                 // Ignore this, the caller will submit them all right now anyway.
                 Notification::ForceSubmitQueued => (),
@@ -117,6 +123,8 @@ impl ChatAgent {
 
                 // Ignore this, the caller will submit them all right now anyway.
                 Notification::ForceSubmitQueued => (),
+
+                Notification::Continue => (),
             }
         }
 
@@ -144,10 +152,24 @@ impl ChatAgent {
         any_messages
     }
 
+    /// Whether a history can be submitted without a new user message: it must top out on a tool
+    /// result (e.g. an interrupted session) or a user message the model has not answered yet.
+    fn can_continue(history: &[ChatMessage]) -> bool {
+        matches!(
+            history.last(),
+            Some(ChatMessage::Tool(_)) | Some(ChatMessage::User(_))
+        )
+    }
+
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
     async fn do_run(&mut self, mut agent: llimorse::Agent) -> Result<()> {
         while self.process_notifications().await && self.process_available_notifications() {
-            self.submit_queued_user_messages(&mut agent);
+            // If there were no queued user messages, we received `Continue` notification; honor
+            // that only if we can actually continue, i.e. if there is anything to submit.
+            if !self.submit_queued_user_messages(&mut agent) && !Self::can_continue(agent.history())
+            {
+                continue;
+            }
 
             let response = loop {
                 let mut streaming = agent.submit().await?;
@@ -282,10 +304,48 @@ impl Incoming {
                 Notification::Exit => return true,
                 Notification::ForceSubmitQueued => return false,
 
+                Notification::Continue => (),
+
                 Notification::QueuePrompt(p) => self.queued_messages.push_back(p),
             }
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatAgent;
+    use llimorse::line_format::{AssistantMessage, ChatMessage, ToolResult, UserMessage};
+
+    #[test]
+    fn can_continue_on_tool_result() {
+        let result = ToolResult::new("call-1".to_string(), Ok("done".to_string()));
+        let history = vec![ChatMessage::Tool(result)];
+        assert!(ChatAgent::can_continue(&history));
+    }
+
+    #[test]
+    fn can_continue_on_unanswered_user_message() {
+        let history = vec![ChatMessage::User(UserMessage {
+            content: "hello".to_string(),
+        })];
+        assert!(ChatAgent::can_continue(&history));
+    }
+
+    #[test]
+    fn cannot_continue_after_assistant_message() {
+        let history = vec![ChatMessage::Assistant(AssistantMessage {
+            reasoning_content: None,
+            content: Some("hi there".to_string()),
+            tool_calls: None,
+        })];
+        assert!(!ChatAgent::can_continue(&history));
+    }
+
+    #[test]
+    fn cannot_continue_on_empty_history() {
+        assert!(!ChatAgent::can_continue(&[]));
     }
 }
