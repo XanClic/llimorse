@@ -46,7 +46,7 @@ derive_merge! {
         /// In a config file, `system` may be a single path (legacy) or a list
         /// of paths.
         #[arg(long)]
-        #[serde(deserialize_with = "helpers::system_files::deserialize")]
+        #[serde(default, deserialize_with = "helpers::system_files::deserialize")]
         system: Vec<PathBuf>,
 
         /// Enable debug-level logging

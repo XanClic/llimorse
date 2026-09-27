@@ -80,7 +80,7 @@ derive_merge! {
         /// In a config file, `system` may be a single path (legacy) or a list
         /// of paths.
         #[arg(long)]
-        #[serde(deserialize_with = "helpers::system_files::deserialize")]
+        #[serde(default, deserialize_with = "helpers::system_files::deserialize")]
         system: Vec<PathBuf>,
 
         /// Path to a file containing the subagent system prompt. May be repeated;
@@ -89,7 +89,7 @@ derive_merge! {
         /// `--subagent-system`, the built-in one is used. In a config file,
         /// `subagent-system` may be a single path or a list of paths.
         #[arg(long)]
-        #[serde(deserialize_with = "helpers::system_files::deserialize")]
+        #[serde(default, deserialize_with = "helpers::system_files::deserialize")]
         subagent_system: Vec<PathBuf>,
 
         /// Maximum number of subagents that may run in parallel [default: unlimited]
@@ -115,6 +115,7 @@ derive_merge! {
 
         /// Auto-approve all tool calls
         #[arg(long)]
+        #[serde(default)]
         zesty: bool,
     }
 }
