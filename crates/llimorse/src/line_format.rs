@@ -126,6 +126,10 @@ pub struct ChatCompletion<'a> {
     /// Options for streaming
     pub stream_options: StreamOptions,
 
+    /// llama.cpp-specific: stream prompt processing (prefill) progress events
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub return_progress: bool,
+
     /// Which tools are available
     #[serde(default, skip_serializing_if = "<[ToolDefinition]>::is_empty")]
     pub tools: &'a [ToolDefinition],

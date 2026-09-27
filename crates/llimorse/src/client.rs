@@ -53,13 +53,19 @@ pub struct ClientState {
 /// Token counts from a completed chat request
 #[derive(Debug, Default)]
 pub struct TokenUsage {
-    /// Tokens in the prompt
+    /// Prompt tokens in the context so far (grows during prefill)
     pub prompt_tokens: usize,
 
-    /// New tokens produced
-    pub completion_tokens: usize,
+    /// During generation: New tokens produced
+    pub completion_tokens: Option<usize>,
 
-    /// Tokens being streamed
+    /// During prefill: The total number of tokens after prefill is done
+    pub prefill_target: Option<usize>,
+
+    /// Tokens taken from the cache in the last prefill
+    pub cached_tokens: usize,
+
+    /// Tokens that have been streamed and are not accounted above
     pub streamed_tokens: usize,
 }
 
@@ -161,6 +167,7 @@ impl Client {
                 include_usage: true,
                 ..Default::default()
             },
+            return_progress: true,
             tools,
             tool_choice: tool_choice.into(),
         };
@@ -251,7 +258,9 @@ impl Client {
 
 impl TokenUsage {
     /// The full sum of all tokens in the context
+    ///
+    /// Does not include tokens planned for prefill, but not yet processed.
     pub fn sum(&self) -> usize {
-        self.prompt_tokens + self.completion_tokens + self.streamed_tokens
+        self.prompt_tokens + self.completion_tokens.unwrap_or(0) + self.streamed_tokens
     }
 }

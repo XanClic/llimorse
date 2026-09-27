@@ -142,6 +142,34 @@ struct StreamChunk {
     /// Token usage (before `[DONE]`)
     #[serde(default)]
     usage: Option<UsagePayload>,
+
+    /// Prefill progress (llama.cpp extension; present on non-token chunks)
+    #[serde(default)]
+    prompt_progress: Option<PromptProgress>,
+}
+
+/// Prefill progress as reported by llama-server (`prompt_progress` chunk field)
+#[derive(Clone, Debug, Deserialize)]
+struct PromptProgress {
+    /// Total tokens in the prompt (known before prefill starts)
+    #[serde(default)]
+    total: u32,
+
+    /// Tokens reused from the KV cache (not re-processed)
+    #[serde(default)]
+    cache: u32,
+
+    /// Prompt tokens taken in so far: cached prefix + computed/queued (absolute position in the
+    /// prompt; starts at `cache`, ends at `total`)
+    #[serde(default)]
+    processed: u32,
+
+    /// Milliseconds elapsed in prompt processing
+    ///
+    /// Part of the wire format; not used for the moment.
+    #[serde(default)]
+    #[allow(dead_code)]
+    time_ms: u64,
 }
 
 /// Token usage as reported by the LLM
@@ -281,16 +309,33 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     /// - [`StreamingResult::constructing`]
     /// - [`StreamingResult::client_state`] (if in the input)
     fn apply_chunk(&mut self, chunk: StreamChunk) -> Result<()> {
+        if let Some(progress) = &chunk.prompt_progress {
+            let mut client_state = self.client_state.write();
+            client_state.token_usage = TokenUsage {
+                prompt_tokens: progress.processed as usize,
+                completion_tokens: None,
+                prefill_target: Some(progress.total as usize),
+                cached_tokens: progress.cache as usize,
+                streamed_tokens: 0,
+            };
+        }
+
         for choice in chunk.choices {
-            self.client_state.write().token_usage.streamed_tokens += 1;
+            // Progress events carry an (empty) choice but are not tokens
+            if chunk.prompt_progress.is_none() {
+                self.client_state.write().token_usage.streamed_tokens += 1;
+            }
             self.choice_received(choice)?;
         }
 
         if let Some(u) = chunk.usage {
             let mut client_state = self.client_state.write();
+            let cached_tokens = client_state.token_usage.cached_tokens;
             client_state.token_usage = TokenUsage {
                 prompt_tokens: u.prompt_tokens as usize,
-                completion_tokens: u.completion_tokens as usize,
+                completion_tokens: Some(u.completion_tokens as usize),
+                prefill_target: None,
+                cached_tokens,
                 streamed_tokens: 0,
             };
         }
@@ -689,5 +734,121 @@ impl StreamingObject for StreamingCustomCall {
 
     fn force_finalize(self) -> CustomCall {
         todo!("Incomplete tool calls forbidden for the moment")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    /// A stream that yields a fixed sequence of byte chunks, then ends.
+    struct FakeStream(std::vec::IntoIter<bytes::Bytes>);
+
+    impl Stream for FakeStream {
+        type Item = reqwest::Result<bytes::Bytes>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.0.next().map(Ok))
+        }
+    }
+
+    /// A stream that yields a single chunk and then stalls, like a server that
+    /// is still processing the prompt.
+    struct StalledStream(Option<bytes::Bytes>);
+
+    impl Stream for StalledStream {
+        type Item = reqwest::Result<bytes::Bytes>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.0.take() {
+                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    /// A fresh [`ClientState`] for test streams.
+    fn test_state() -> Arc<RwLock<ClientState>> {
+        Arc::new(RwLock::new(ClientState {
+            model_name: String::new(),
+            context_size: None,
+            token_usage: Default::default(),
+            operation_stage: Default::default(),
+        }))
+    }
+
+    /// Wrap an SSE payload in a `data:` frame.
+    fn sse(payload: &str) -> bytes::Bytes {
+        format!("data: {payload}\n").into()
+    }
+
+    /// A progress event must update the prefill state and count as no tokens.
+    #[tokio::test]
+    async fn progress_event_updates_prefill_state_without_counting_tokens() {
+        let state = test_state();
+        let stream = StalledStream(Some(sse(
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}],"prompt_progress":{"total":1000,"cache":400,"processed":500,"time_ms":12}}"#,
+        )));
+        let mut result = Box::pin(StreamingResult::from_stream(stream, state.clone()));
+
+        // The progress event emits no chunk; one poll consumes it and then
+        // stalls waiting for the rest of the stream
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(result.as_mut().poll_next(&mut cx).is_pending());
+
+        let state = state.read();
+        // `processed` is the queued frontier: already includes the cached prefix
+        assert_eq!(state.token_usage.prompt_tokens, 500);
+        assert_eq!(state.token_usage.cached_tokens, 400);
+        assert_eq!(state.token_usage.prefill_target, Some(1000));
+        assert_eq!(state.token_usage.streamed_tokens, 0);
+    }
+
+    /// Progress events feed the client state, content chunks count as tokens,
+    /// and the usage chunk stores the authoritative counts and clears the
+    /// prefill fields.
+    #[tokio::test]
+    async fn prompt_progress_lifecycle() {
+        let state = test_state();
+        let stream = FakeStream(
+            vec![
+                sse(
+                    r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}],"prompt_progress":{"total":1000,"cache":400,"processed":500,"time_ms":12}}"#,
+                ),
+                sse(r#"{"choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"#),
+                sse(r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":7}}"#),
+                sse("[DONE]"),
+            ]
+            .into_iter(),
+        );
+        let mut result = Box::pin(StreamingResult::from_stream(stream, state.clone()));
+
+        // The progress event emits no chunk; the first chunk out is the content one
+        let chunk = result.next().await.unwrap().unwrap();
+        assert!(matches!(chunk, StreamingChunk::Content(ref text) if text == "Hi"));
+
+        {
+            let state = state.read();
+            assert_eq!(state.token_usage.prompt_tokens, 500);
+            assert_eq!(state.token_usage.cached_tokens, 400);
+            assert_eq!(state.token_usage.prefill_target, Some(1000));
+            assert_eq!(state.token_usage.streamed_tokens, 1);
+            assert_eq!(state.operation_stage, AgentStage::ResponseGeneration);
+        }
+
+        // The usage event and [DONE] emit no chunks; both end the request
+        assert!(result.next().await.is_none());
+
+        let state = state.read();
+        assert_eq!(state.token_usage.prompt_tokens, 1000);
+        assert_eq!(state.token_usage.completion_tokens, Some(7));
+        assert_eq!(state.token_usage.prefill_target, None);
+        // The cache count is only observable during the prefill, so it must
+        // survive the usage payload
+        assert_eq!(state.token_usage.cached_tokens, 400);
+        assert_eq!(state.token_usage.streamed_tokens, 0);
+        assert_eq!(state.operation_stage, AgentStage::Idle);
     }
 }
