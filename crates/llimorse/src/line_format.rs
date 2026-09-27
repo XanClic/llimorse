@@ -300,6 +300,24 @@ pub enum ToolReference<'a> {
     Custom(CustomReference<'a>),
 }
 
+impl ChatMessage {
+    /// Return whether this message carries no content at all
+    ///
+    /// Tool results are never considered empty, because they always answer a tool call.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ChatMessage::System(msg) => msg.content.is_empty(),
+            ChatMessage::User(msg) => msg.content.is_empty(),
+            ChatMessage::Assistant(msg) => {
+                msg.content.as_ref().is_none_or(|c| c.is_empty())
+                    && msg.reasoning_content.as_ref().is_none_or(|r| r.is_empty())
+                    && msg.tool_calls.as_ref().is_none_or(|t| t.is_empty())
+            }
+            ChatMessage::Tool(_) => false,
+        }
+    }
+}
+
 impl From<SystemMessage> for ChatMessage {
     fn from(system: SystemMessage) -> Self {
         ChatMessage::System(system)
