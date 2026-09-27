@@ -771,8 +771,6 @@ mod tests {
     /// A fresh [`ClientState`] for test streams.
     fn test_state() -> Arc<RwLock<ClientState>> {
         Arc::new(RwLock::new(ClientState {
-            model_name: String::new(),
-            context_size: None,
             token_usage: Default::default(),
             operation_stage: Default::default(),
         }))
