@@ -13,12 +13,26 @@
 #                                     # CLAUDE.md in the working directory
 #                                     # is pushed in automatically
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
+#   lemonade.sh --force-fresh # the worktree holds work this checkout
+#                             # lacks, or a clean slate is wanted: wipe
+#                             # the worktree (session logs kept) and start
+#                             # from a fresh clone of the checkout
 #
 # The container runs with --rm: it and its writable layer (target/,
 # runtime dnf installs) are gone when lemon exits. The worktree and the
 # session logs under ${TMPDIR:-/tmp}/lemon are gone at reboot. A SearXNG
 # sidecar for web_search runs on a private per-session network and dies
 # when the script exits.
+#
+# The worktree outlives the session (until reboot), so it and the checkout
+# can move apart — and it is on tmpfs, so work in it that has not been
+# fetched into the checkout dies at reboot. A session therefore refuses to
+# start while the worktree holds commits the checkout lacks or uncommitted
+# changes: fetch them (git fetch lemon-worktree) or discard them
+# (--force-fresh). A worktree that is merely behind the checkout is
+# re-cloned with a note — nothing in it is missing from the checkout, so
+# the clone loses nothing. When lemon exits, the script reports any
+# un-fetched work, so the fetch decision happens while it is still fresh.
 
 set -euo pipefail
 
@@ -53,6 +67,48 @@ if [ -d "$OLD_WORKTREE" ] && [ ! -e "$WORKTREE" ]; then
     mv "$OLD_WORKTREE" "$WORKTREE"
 fi
 
+# Argument interception: these flags are lemonade's, not lemon's, so they
+# are consumed here and rewritten for the container; everything else is
+# forwarded.
+#
+# --system: lemon's --system takes a path that must exist inside the
+# container (unlike its other path flags it is not a container path), so
+# lemonade.sh intercepts it and bind-mounts the host file — any path, in
+# the repo or not — at /system-prompt.md, forwarding the container path.
+# With no --system given, AGENTS.md / CLAUDE.md in the working directory
+# (where lemonade.sh was invoked, any subdirectory) is detected later and
+# pushed in; an explicit --system always wins.
+#
+# --force-fresh: discard the worktree's state — the divergence gate below
+# would refuse to start while it holds un-fetched work — or simply start
+# from a clean slate. Only the worktree directory is wiped; the session
+# logs under $SESSIONS are kept.
+SYSFILE=""
+FORCE_FRESH=""
+NEW_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --system)
+            [ $# -ge 2 ] || { echo "Error: --system needs a value" >&2; exit 1; }
+            SYSFILE="$2"; shift 2
+            NEW_ARGS+=(--system /system-prompt.md)
+            ;;
+        --system=*)
+            SYSFILE="${1#--system=}"
+            NEW_ARGS+=(--system /system-prompt.md)
+            shift
+            ;;
+        --force-fresh)
+            FORCE_FRESH=1
+            shift
+            ;;
+        *)
+            NEW_ARGS+=("$1"); shift
+            ;;
+    esac
+done
+set -- "${NEW_ARGS[@]}"
+
 # Host-built lemon binary the container runs. Stale until you rebuild on
 # the host — by design. `|| true` keeps set -e from killing the script
 # before the check below can print the helpful error.
@@ -70,6 +126,207 @@ LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
 # realpath also resolves symlinks, which bind-mounts prefer. (Strict mode
 # is fine: the -x check above guarantees the file exists.)
 LEMON_BIN=$(realpath "$LEMON_BIN")
+
+# Divergence check: compare this checkout with the worktree and set the
+# globals the divergence gate reads:
+#   WT_AT_RISK=1   the worktree holds commits this checkout lacks (on any
+#                  branch, including a branch this checkout no longer has),
+#                  has uncommitted changes, or is on a detached HEAD — work
+#                  that dies at reboot if it is never fetched
+#   WT_STALE=1     nothing at risk, but the worktree is missing state this
+#                  checkout has: a branch the checkout is ahead on, a branch
+#                  only the checkout has, or a different checked-out branch
+#   RISK_LINES, STALE_REASONS  the human-readable report lines
+#
+# The worktree has no remotes (the review gate), so this checkout cannot
+# see commits lemon made there unless it fetches them: the fetch below is
+# read-only and lands in lemon-worktree/* remote-tracking refs — nothing
+# is merged. With no worktree yet (first run, or one just wiped) there is
+# nothing to compare.
+check_divergence() {
+    WT_AT_RISK=0
+    WT_STALE=0
+    RISK_LINES=()
+    STALE_REASONS=()
+    [ -d "$WORKTREE/.git" ] || return 0
+
+    git -C "$TOPLEVEL" fetch lemon-worktree --quiet
+
+    local b wt_tip host_tip
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        wt_tip=$(git -C "$WORKTREE" rev-parse --verify --quiet "refs/heads/$b") || continue
+        if ! host_tip=$(git -C "$TOPLEVEL" rev-parse --verify --quiet "refs/heads/$b"); then
+            WT_AT_RISK=1
+            RISK_LINES+=("$b: exists only in the worktree (no such branch in this checkout)")
+            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "refs/heads/$b")")
+        elif ! git -C "$TOPLEVEL" merge-base --is-ancestor "lemon-worktree/$b" "refs/heads/$b"; then
+            WT_AT_RISK=1
+            RISK_LINES+=("$b: $(git -C "$TOPLEVEL" rev-list --count "refs/heads/$b..$wt_tip") commit(s) in the worktree that this checkout lacks")
+            RISK_LINES+=("        worktree @ $(git -C "$WORKTREE" rev-parse --short "refs/heads/$b"), checkout @ $(git -C "$TOPLEVEL" rev-parse --short "refs/heads/$b")")
+        elif [ "$(git -C "$TOPLEVEL" rev-parse "refs/heads/$b")" != "$(git -C "$TOPLEVEL" rev-parse "lemon-worktree/$b")" ]; then
+            WT_STALE=1
+            STALE_REASONS+=("this checkout is ahead of the worktree on $b")
+        fi
+    done < <(git -C "$WORKTREE" for-each-ref --format='%(refname:short)' refs/heads)
+
+    local c
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        if ! git -C "$WORKTREE" rev-parse --verify --quiet "refs/heads/$c" >/dev/null; then
+            WT_STALE=1
+            STALE_REASONS+=("branch $c exists only in this checkout")
+        fi
+    done < <(git -C "$TOPLEVEL" for-each-ref --format='%(refname:short)' refs/heads)
+
+    local wt_ref host_ref
+    wt_ref=$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    host_ref=$(git -C "$TOPLEVEL" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$wt_ref" = "HEAD" ]; then
+        WT_AT_RISK=1
+        RISK_LINES+=("the worktree is on a detached HEAD; a commit there may be on no branch at all")
+    elif [ "$wt_ref" != "$host_ref" ]; then
+        WT_STALE=1
+        STALE_REASONS+=("worktree is on '$wt_ref', this checkout is on '$host_ref'")
+    fi
+
+    local dirty line
+    dirty=$(git -C "$WORKTREE" status --porcelain 2>/dev/null || true)
+    if [ -n "$dirty" ]; then
+        WT_AT_RISK=1
+        RISK_LINES+=("uncommitted changes in the worktree:")
+        while IFS= read -r line; do
+            RISK_LINES+=("        $line")
+        done <<< "$dirty"
+    fi
+}
+
+# Print a report-line array collected by check_divergence, indented to sit
+# under the caller's "Error:" / "Note:" prefix ($1 = the base column).
+print_risk_lines() {
+    local l
+    for l in "${RISK_LINES[@]}"; do printf '%*s%s\n' "$1" '' "$l"; done
+}
+print_stale_reasons() {
+    local l
+    for l in "${STALE_REASONS[@]}"; do printf '%*s%s\n' "$1" '' "$l"; done
+}
+
+# Worktree: cloned for the session, then the container owns it. Re-cloned
+# when the divergence gate below decides the worktree is stale, or when
+# --force-fresh is given.
+#
+# --force-fresh first: the flag is an explicit request to destroy whatever
+# is in the worktree — half-dead or not — so it runs before the half-dead
+# check below. Only the worktree directory goes; the session logs under
+# $SESSIONS are kept, they are the --resume handles.
+if [ -n "$FORCE_FRESH" ]; then
+    echo "Note: --force-fresh: removing $WORKTREE and re-cloning from $TOPLEVEL."
+    rm -rf "$WORKTREE"
+fi
+
+if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
+    # Half-dead worktree (interrupted clone or partial deletion): git
+    # clone would refuse the non-empty dir on this and every later run.
+    echo "Error: $WORKTREE exists but is not a git worktree." >&2
+    echo "       remove it and retry: rm -rf '$WORKTREE'" >&2
+    exit 1
+fi
+
+# The source checkout keeps a remote named lemon-worktree pointing at the
+# worktree, so the divergence check below — and the user's own fetches —
+# address the worktree by name, not by path: `git fetch lemon-worktree
+# <branch>` (and `git push lemon-worktree <branch>` mid-session). Added
+# once and re-checked on every run, so the check also recovers from a
+# manually removed remote. It lives only in the source checkout — the
+# worktree itself has no remotes, so the review gate is untouched.
+if ! git -C "$TOPLEVEL" remote get-url lemon-worktree >/dev/null 2>&1; then
+    git -C "$TOPLEVEL" remote add lemon-worktree "$WORKTREE"
+fi
+
+# Divergence gate. The worktree outlives the session (until reboot or
+# manual deletion), so it and this checkout can move apart — and the
+# worktree is on tmpfs, so work in it that has not been fetched into this
+# checkout dies at reboot.
+#   at risk — the worktree holds commits this checkout lacks, has
+#             uncommitted changes, or is on a detached HEAD. Refuse to
+#             start: the user must fetch the work or explicitly discard
+#             it with --force-fresh. A bare note is how work gets
+#             forgotten, and forgetting is the failure mode.
+#   stale   — the worktree is a strict subset of the checkout (the
+#             checkout moved on, added branches, or switched branch).
+#             Nothing at risk, no decision to make: re-clone with a note
+#             and start; every commit in the worktree is already here.
+#   equal   — start as is.
+check_divergence
+if [ "$WT_AT_RISK" = 1 ]; then
+    {
+        echo "Error: the worktree has work that this checkout does not have."
+        echo "       It lives on tmpfs and dies at reboot; the only durable copy"
+        echo "       of it is a fetch into this checkout."
+        print_risk_lines 7
+        echo "       fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
+        echo "       or discard:  lemonade.sh --force-fresh"
+    } >&2
+    exit 1
+fi
+if [ "$WT_STALE" = 1 ]; then
+    {
+        echo "Note: the worktree is behind this checkout; re-cloning it from"
+        echo "      $TOPLEVEL (every commit in it is already here, so this"
+        echo "      loses nothing):"
+        print_stale_reasons 6
+    } >&2
+    rm -rf "$WORKTREE"
+fi
+
+if [ ! -d "$WORKTREE/.git" ]; then
+    mkdir -p "$WORKTREE_ROOT"
+    git clone "$TOPLEVEL" "$WORKTREE"
+    # Mirror the checkout's full branch set into the worktree as local
+    # branches — a plain clone leaves everything but the checked-out
+    # branch as remote-tracking refs (and git refuses to fetch into the
+    # checked-out branch). The divergence gate compares branch by branch
+    # on the assumption that the worktree's local branches mirror the
+    # checkout's; this keeps that true at clone time. The clone already
+    # brought in every branch as an origin/* remote-tracking ref, so
+    # this only adds local refs, no fetch.
+    WT_HEAD_BRANCH=$(git -C "$WORKTREE" symbolic-ref --short HEAD 2>/dev/null || echo "")
+    if [ -n "$WT_HEAD_BRANCH" ]; then
+        while IFS= read -r ref; do
+            b="${ref#refs/remotes/origin/}"
+            [ "$b" = "HEAD" ] && continue
+            [ "$b" = "$WT_HEAD_BRANCH" ] && continue
+            git -C "$WORKTREE" branch "$b" "$ref"
+        done < <(git -C "$WORKTREE" for-each-ref --format='%(refname)' 'refs/remotes/origin/')
+    fi
+    # Review gate: no origin, so nothing in the container can reach your
+    # checkout except you fetching it.
+    git -C "$WORKTREE" remote remove origin
+    # Lets you push a branch back into the checked-out worktree
+    # mid-session: git push "$WORKTREE" <branch>
+    # (refused while the worktree is dirty).
+    git -C "$WORKTREE" config receive.denyCurrentBranch updateInstead
+    # Author identity: the container has no host-side ~/.gitconfig, so
+    # resolve name and email where the source checkout lives (its local
+    # config, then host global/system) and pin them in the worktree's
+    # local config — otherwise commits lemon makes in the container have
+    # no author. The worktree signs as the host would. If the host has
+    # no identity at all, warn and leave the worktree without one (git
+    # refuses commits until one is set).
+    HOST_NAME=$(git -C "$TOPLEVEL" config user.name 2>/dev/null || true)
+    HOST_EMAIL=$(git -C "$TOPLEVEL" config user.email 2>/dev/null || true)
+    if [ -n "$HOST_NAME" ]; then
+        git -C "$WORKTREE" config user.name "$HOST_NAME"
+    fi
+    if [ -n "$HOST_EMAIL" ]; then
+        git -C "$WORKTREE" config user.email "$HOST_EMAIL"
+    fi
+    if [ -z "$HOST_NAME" ] && [ -z "$HOST_EMAIL" ]; then
+        echo "Warning: no user.name/user.email in the git config of" >&2
+        echo "         $TOPLEVEL; commits in the worktree will have no author." >&2
+    fi
+fi
 
 # Base image: pull for freshness; if the registry is unreachable, fall
 # back to the cached copy. (Tag must match the FROM below.)
@@ -145,72 +402,6 @@ ENV WORKTREE=/work
 ENTRYPOINT ["/bin/sh", "-c", "if [ -d \"$WORKTREE\" ] && [ -f \"$WORKTREE/Cargo.toml\" ]; then mkdir -p /target && rm -rf \"$WORKTREE/target\" && ln -s /target \"$WORKTREE/target\"; fi; if [ $# -eq 0 ]; then exec bash; fi; exec \"$@\"", "--"]
 LEMON_CONTAINERFILE
 
-# Worktree: clone once per session, then the container owns it.
-if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
-    # Half-dead worktree (interrupted clone or partial deletion): git
-    # clone would refuse the non-empty dir on this and every later run.
-    echo "Error: $WORKTREE exists but is not a git worktree." >&2
-    echo "       remove it and retry: rm -rf '$WORKTREE'" >&2
-    exit 1
-fi
-if [ ! -d "$WORKTREE/.git" ]; then
-    mkdir -p "$WORKTREE_ROOT"
-    git clone "$TOPLEVEL" "$WORKTREE"
-    # Review gate: no origin, so nothing in the container can reach your
-    # checkout except you fetching it.
-    git -C "$WORKTREE" remote remove origin
-    # Lets you push a branch back into the checked-out worktree
-    # mid-session: git push "$WORKTREE" <branch>
-    # (refused while the worktree is dirty).
-    git -C "$WORKTREE" config receive.denyCurrentBranch updateInstead
-    # Author identity: the container has no host-side ~/.gitconfig, so
-    # resolve name and email where the source checkout lives (its local
-    # config, then host global/system) and pin them in the worktree's
-    # local config — otherwise commits lemon makes in the container have
-    # no author. The worktree signs as the host would. If the host has
-    # no identity at all, warn and leave the worktree without one (git
-    # refuses commits until one is set).
-    HOST_NAME=$(git -C "$TOPLEVEL" config user.name 2>/dev/null || true)
-    HOST_EMAIL=$(git -C "$TOPLEVEL" config user.email 2>/dev/null || true)
-    if [ -n "$HOST_NAME" ]; then
-        git -C "$WORKTREE" config user.name "$HOST_NAME"
-    fi
-    if [ -n "$HOST_EMAIL" ]; then
-        git -C "$WORKTREE" config user.email "$HOST_EMAIL"
-    fi
-    if [ -z "$HOST_NAME" ] && [ -z "$HOST_EMAIL" ]; then
-        echo "Warning: no user.name/user.email in the git config of" >&2
-        echo "         $TOPLEVEL; commits in the worktree will have no author." >&2
-    fi
-fi
-
-# The source checkout keeps a remote named lemon-worktree pointing at the
-# worktree, so a session's commits are fetched by name, not by path:
-# `git fetch lemon-worktree <branch>` (and `git push lemon-worktree
-# <branch>` mid-session). Added once and re-checked on every run, so the
-# check also recovers from a manually removed remote. It lives only in
-# the source checkout — the worktree itself has no remotes, so the review
-# gate is untouched.
-if ! git -C "$TOPLEVEL" remote get-url lemon-worktree >/dev/null 2>&1; then
-    git -C "$TOPLEVEL" remote add lemon-worktree "$WORKTREE"
-fi
-
-# The worktree outlives the session (until reboot or manual deletion), so
-# the host checkout may have moved since it was cloned. "Start fresh"
-# removes the whole state dir — tree and session logs — because a resumed
-# conversation is about the tree it ran in.
-WT_REF=$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
-HOST_REF=$(git -C "$TOPLEVEL" rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
-WT_HEAD=$(git -C "$WORKTREE" rev-parse --short HEAD 2>/dev/null || echo none)
-HOST_HEAD=$(git -C "$TOPLEVEL" rev-parse --short HEAD 2>/dev/null || echo none)
-if [ "$WT_REF" != "$HOST_REF" ]; then
-    echo "Warning: worktree is on '$WT_REF' @ $WT_HEAD but this checkout is" >&2
-    echo "         on '$HOST_REF' @ $HOST_HEAD. lemon will start from the" >&2
-    echo "         worktree's branch; to start fresh: rm -rf '$LEMON_ROOT/$KEY'" >&2
-elif [ "$WT_HEAD" != "$HOST_HEAD" ]; then
-    echo "Note: worktree $WT_REF @ $WT_HEAD differs from host @ $HOST_HEAD (un-fetched work?)" >&2
-fi
-
 # SearXNG sidecar (lemon's web_search tool): private per-session network,
 # killed by the EXIT trap. It keeps the image's native port 8080 inside
 # the network and is never published to the host, so it cannot collide
@@ -243,34 +434,6 @@ podman rm -f "$SEARXNG" >/dev/null 2>&1 || true  # stale container from a crashe
 podman run --rm -d --name "$SEARXNG" --network "$NET" \
     -v "$SEARXNG_SETTINGS:/etc/searxng/settings.yml:ro,z" \
     "$SEARXNG_IMAGE"
-
-# System prompt: lemon's --system takes a path that must exist inside the
-# container (unlike its other path flags it is not a container path), so
-# lemonade.sh intercepts it and bind-mounts the host file — any path, in
-# the repo or not — at /system-prompt.md, forwarding the container path.
-# With no --system given, AGENTS.md / CLAUDE.md in the working directory
-# (where lemonade.sh was invoked, any subdirectory) is detected and
-# pushed in; an explicit --system always wins.
-SYSFILE=""
-NEW_ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --system)
-            [ $# -ge 2 ] || { echo "Error: --system needs a value" >&2; exit 1; }
-            SYSFILE="$2"; shift 2
-            NEW_ARGS+=(--system /system-prompt.md)
-            ;;
-        --system=*)
-            SYSFILE="${1#--system=}"
-            NEW_ARGS+=(--system /system-prompt.md)
-            shift
-            ;;
-        *)
-            NEW_ARGS+=("$1"); shift
-            ;;
-    esac
-done
-set -- "${NEW_ARGS[@]}"
 
 MOUNTS=(-v "$WORKTREE:/work:z"
         -v "$SESSIONS:/sessions:z"
@@ -328,6 +491,25 @@ if [ "$hint_resume" -eq 1 ]; then
     if [ -n "$newest" ]; then
         echo "To continue this conversation: lemonade.sh --resume /sessions/$newest"
     fi
+fi
+
+# Post-session reminder: un-fetched work in the worktree is on tmpfs and
+# dies at reboot. The gate above refuses to start while it exists, but the
+# moment to fetch is now, while the session is fresh in the user's head —
+# not at the next hard stop. Same check as the gate; a reminder, not a
+# stop, the session already ran. Its fetch also leaves the lemon-worktree/*
+# refs ready, so `git merge lemon-worktree/<branch>` works immediately.
+check_divergence
+if [ "$WT_AT_RISK" = 1 ]; then
+    {
+        echo "Note: the worktree has work that this checkout does not have. It"
+        echo "     dies at reboot — fetch it now, or discard it deliberately:"
+        print_risk_lines 5
+        echo "     fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
+        echo "     or discard:  lemonade.sh --force-fresh"
+    }
+elif [ "$WT_STALE" = 1 ]; then
+    echo "Note: this checkout has moved past the worktree; the next run will re-clone it."
 fi
 
 exit "$status"

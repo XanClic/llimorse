@@ -21,7 +21,12 @@ subdirectory; the worktree is keyed on the top-level path):
 
 Steps:
 
-1. Build the image (refresh) from the Containerfile embedded in the
+1. Lemonade's own flags are intercepted from the arguments (see System
+   prompt below), then the divergence gate runs against any existing
+   worktree (see The divergence gate below): un-fetched work aborts the
+   run, a worktree that is a strict subset of the checkout is re-cloned
+   with a note.
+2. Build the image (refresh) from the Containerfile embedded in the
    script itself, passed on stdin (`-f -`) with no context argument —
    the context is podman's internal temp dir holding that file only, so
    nothing from the target repo is ever referenced. The layer cache makes
@@ -29,8 +34,12 @@ Steps:
    moved; one full rebuild when it does.
    The base image is pulled first for freshness; offline, the build falls
    back to the cached copy and fails clearly if there is none.
-2. If the session worktree doesn't exist yet:
-   `git clone <top-level> "${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>"`, then
+3. If the session worktree still doesn't exist (first run,
+   `--force-fresh`, or a re-clone by the divergence gate): `git clone
+   <top-level> "${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>"`, then the
+   full branch set is mirrored into the worktree as local branches (a
+   plain clone leaves the rest as remote-tracking refs, which the
+   divergence gate's per-branch comparison assumes away), then\
    `git remote remove origin` (the review gate),
    `git config receive.denyCurrentBranch updateInstead` (so the host can
    push into the checked-out branch mid-session; refused while dirty),
@@ -43,9 +52,9 @@ Steps:
    source checkout has a remote `lemon-worktree` pointing at the worktree
    (added if missing), so the git commands below use the name, not the
    path.
-3. Start the SearXNG sidecar for `web_search` on a private per-session
+4. Start the SearXNG sidecar for `web_search` on a private per-session
    network.
-4. `podman run --rm -it` on that network with the worktree, the
+5. `podman run --rm -it` on that network with the worktree, the
    per-checkout session-log directory at `/sessions`, and the lemon
    binary bind-mounted — plus the system prompt file at
    `/system-prompt.md` when one is chosen (see System prompt below) —
@@ -55,6 +64,11 @@ Steps:
    /sessions` unless the caller already passes one, and prints the resume
    command for the newest log when lemon exits (see Session logs and
    resume below).
+
+When lemon exits, the script runs the divergence check once more and
+reports any un-fetched work in the worktree, so the fetch-or-discard
+decision happens while the session is fresh (see The divergence gate
+below).
 
 The container runs with `--rm`: when lemon exits, the container and its
 writable layer are deleted. That is the whole session-end ritual.
@@ -104,9 +118,48 @@ dirty, which is the behavior you want.
 Iteration does not survive the session: once the worktree is gone
 (reboot, or manual deletion), anything not fetched is gone, uncommitted
 work included. That is the intended pressure to land work. The
-worktree itself outlives the session — the next run reuses it — so if
-the host checkout has switched branches in the meantime, lemonade warns
-before starting; the worktree keeps its own branch.
+worktree itself outlives the session — the next run reuses it — so the
+checkout and the worktree can move apart between sessions; the
+divergence gate below decides what that means.
+
+## The divergence gate
+
+The worktree outlives the session (until reboot or manual deletion) and
+sits on tmpfs, so work in it that has not been fetched into the checkout
+dies at reboot, and the two sides can move apart in either direction.
+Every run therefore compares the checkout and the worktree — branch by
+branch, plus the worktree's working tree and HEAD — and acts on the
+result:
+
+- **at risk** — a worktree branch holds commits the checkout lacks
+  (including a branch the checkout no longer has), the worktree has
+  uncommitted changes, or the worktree is on a detached HEAD (a commit
+  on no branch). The run refuses to start, lists each offender with the
+  worktree and checkout tips, and offers the two exits: `git fetch
+  lemon-worktree` and then merge, or `lemonade.sh --force-fresh`.
+- **stale** — nothing at risk, but the worktree is missing state the
+  checkout has: the checkout is ahead on a branch, has a branch the
+  worktree lacks, or has switched branch. No decision to make — the run
+  re-clones the worktree with a note and starts; every commit in it is
+  already in the checkout, so the clone loses nothing.
+- **equal** — the run starts as is.
+
+`--force-fresh` wipes the worktree directory — the session logs under
+the same key are kept — and re-clones from the checkout. A wipe rather
+than a push, even though
+`receive.denyCurrentBranch=updateInstead` would allow a force-push into
+the checked-out branch: a wipe has no checked-out-branch or dirty-tree
+edge cases, and its contract is simply "the worktree becomes exactly
+the checkout".
+
+The comparison needs the worktree's commits in the checkout's object
+store, which the review gate (no remotes in the worktree) keeps out, so
+the gate starts with `git fetch lemon-worktree` — read-only, landing in
+`lemon-worktree/*` remote-tracking refs, nothing merged. When lemon
+exits, the same check runs again as a reminder rather than a stop, so
+the fetch-or-discard decision happens while the session is fresh in the
+user's head; that fetch also leaves the remote-tracking refs ready for
+an immediate `git merge lemon-worktree/<branch>`.
 
 ## Ephemeral storage, by lifetime
 
@@ -208,8 +261,8 @@ the host in the meantime. No rebuild of anything is involved.
 - The container has full network by default; the container boundary plus
   the git gate are the controls, not network isolation.
 - A worktree directory that exists without a `.git` (interrupted clone,
-  partial deletion) aborts the run with a message; `rm -rf` it to
-  proceed.
+  partial deletion) aborts the run with a message; `rm -rf` it — or run
+  with `--force-fresh` — to proceed.
 - One session per checkout: the worktree hash is keyed on the path, so
   two lemonade runs from the same checkout share one worktree, and two
   containers writing one `.git` is index-lock contention. Running two
