@@ -3,6 +3,7 @@
 use crate::ChatHistory;
 use llimorse::client::ClientState;
 use parking_lot::RwLock;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -30,6 +31,36 @@ pub enum Event {
 
     /// Force submitting all queued prompts *right now*
     ForceSubmitQueued,
+}
+
+/// ID of a subagent, unique within one application
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct SubagentId(
+    /// The raw ID
+    usize,
+);
+
+impl SubagentId {
+    /// Create a new subagent ID from the given integer.
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for SubagentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// ID of an agent: the main agent or one of its subagents
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub enum AgentId {
+    /// The main agent
+    Main,
+
+    /// One of the main agent’s subagents
+    Subagent(SubagentId),
 }
 
 /// Notifications to the UI
