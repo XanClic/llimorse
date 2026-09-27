@@ -1410,7 +1410,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "fastrand",
  "helpers",
  "llimorse",
  "llimorse-chat",
