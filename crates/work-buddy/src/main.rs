@@ -170,23 +170,51 @@ async fn main() -> Result<()> {
         llimorse::Client::new(args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT), None).await?;
     let mut agent = llimorse::Agent::new_with_listener(llm, manager.log);
 
+    // The task file, opened up front so its active-task list can be folded
+    // into the single system message below (and so a bad path fails before
+    // anything is pushed).
+    let task_file = match args.tasks {
+        Some(path) => Some(
+            tools::tasks::TaskFile::open(path.clone())
+                .with_context(|| format!("{}", path.display()))?,
+        ),
+        None => None,
+    };
+
     if !manager.history.is_empty() {
         agent.push_history(manager.history.clone());
-    } else if let Some(system_prompt) = system_prompt {
-        agent.push_system(system_prompt);
+    } else {
+        // One system message for the whole history: not every chat template
+        // handles multiple system messages well, and a single one at the top
+        // of the history is the safe shape.  The active-task list and the
+        // date note are folded in (blank line apart), so the agent sees
+        // exactly one system message.
+        let now = Local::now();
+        let date_note = format!(
+            "The current date and time is {}, {}",
+            now.weekday(),
+            now.to_rfc3339_opts(SecondsFormat::Secs, false)
+        );
+        let mut system = system_prompt;
+        if let Some(task_file) = &task_file {
+            let tasks = task_file.active_tasks_message();
+            system = Some(match system {
+                Some(prompt) => format!("{prompt}\n\n{tasks}"),
+                None => tasks,
+            });
+        }
+        let system = match system {
+            Some(prompt) => format!("{prompt}\n\n{date_note}"),
+            None => date_note,
+        };
+        agent.push_system(system);
     }
 
     agent.add_tool(llimorse_tools::WebSearch::new(
         args.searxng_url.as_deref().unwrap_or(SEARXNG_URL_DEFAULT),
     ));
 
-    if let Some(task_file) = args.tasks {
-        let task_file = tools::tasks::TaskFile::open(task_file.clone())
-            .with_context(|| format!("{}", task_file.display()))?;
-
-        if manager.history.is_empty() {
-            task_file.inject_active_tasks(&mut agent);
-        }
+    if let Some(task_file) = task_file {
         task_file.add_tools(&mut agent);
     }
 
@@ -205,14 +233,6 @@ async fn main() -> Result<()> {
 
         knowledge_file.add_tools(&mut agent);
     }
-
-    // Push the current time and date so the LLM knows what the timestamps mean
-    let now = Local::now();
-    agent.push_system(format!(
-        "The current date and time is {}, {}",
-        now.weekday(),
-        now.to_rfc3339_opts(SecondsFormat::Secs, false)
-    ));
 
     let mut app = llimorse_chat::App::new_with_history(
         agent,

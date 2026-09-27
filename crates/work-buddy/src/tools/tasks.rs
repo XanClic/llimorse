@@ -47,10 +47,10 @@ impl TaskFile {
         Ok(TaskFile { path, content })
     }
 
-    /// Inject the list of active tasks as system messages
+    /// Build the list of active tasks as a single message
     ///
     /// This also includes critical backlog items.
-    pub fn inject_active_tasks(&self, agent: &mut Agent) {
+    pub fn active_tasks_message(&self) -> String {
         let active_tasks = self.content.iter().filter(|(_, task)| {
             task.settable.status != TaskStatus::Backlog
                 || task.settable.priority == TaskPriority::Critical
@@ -99,11 +99,7 @@ impl TaskFile {
             .expect("Failed to append to task list string");
         }
 
-        if let Some(message) = message {
-            agent.push_system(&message);
-        } else {
-            agent.push_system("(There are no active tasks.)");
-        }
+        message.unwrap_or_else(|| "(There are no active tasks.)".into())
     }
 
     /// Add relevant tools for this file to `agent`.
