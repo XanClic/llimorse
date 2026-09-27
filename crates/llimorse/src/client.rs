@@ -159,6 +159,13 @@ impl Client {
         tools: &[ToolDefinition],
         tool_choice: T,
     ) -> Result<StreamingResult<impl Stream<Item = reqwest::Result<bytes::Bytes>> + use<T>>> {
+        // `streamed_tokens` is a per-request counter whose only other reset is the final `usage`
+        // chunk — which never arrives if the previous request was interrupted, errored, or the
+        // server omitted usage.  Without this reset, the generating-phase display (`prefill_total
+        // + streamed_tokens`) adds that residue on top of the new request's prompt total,
+        // double-counting it.
+        self.state_mut().token_usage.streamed_tokens = 0;
+
         let request = ChatCompletion {
             model: &self.info.model_name,
             messages,
