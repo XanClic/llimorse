@@ -531,6 +531,7 @@ podman run --rm -it \
     --network "$NET" \
     "${MOUNTS[@]}" \
     -w /work \
+    -e "TERM=$TERM" \
     "$IMAGE" \
     lemon --zesty \
         --llama-url "http://$LLAMA_HOST:8080" \

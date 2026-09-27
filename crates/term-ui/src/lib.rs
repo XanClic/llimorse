@@ -29,7 +29,7 @@ use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::{cmp, fmt, io};
+use std::{cmp, env, fmt, io};
 use tokio::sync::oneshot;
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
@@ -56,6 +56,10 @@ pub struct TermUi {
 
     /// Messages that are queued for sending
     queued_prompts: VecDeque<String>,
+
+    /// Whether a prompt iteration is currently being processed (from `PromptSubmitted`
+    /// until `AwaitingPrompt`); the input title is not bolded while processing
+    processing: bool,
 
     /// Tool calls awaiting a permission decision from the user, oldest first.
     ///
@@ -113,11 +117,6 @@ impl TermUi {
 
         let mut input_area: ratatui_textarea::TextArea<'static> = Default::default();
         input_area.set_cursor_line_style(Default::default());
-        input_area.set_block(
-            Block::bordered()
-                .title(" Input ")
-                .title_style(Style::default().bold()),
-        );
         input_area.set_wrap_mode(ratatui_textarea::WrapMode::Word);
 
         TermUi {
@@ -130,6 +129,7 @@ impl TermUi {
             ),
             input_area,
             queued_prompts: VecDeque::new(),
+            processing: false,
             pending_permissions: VecDeque::new(),
             creation: Instant::now(),
         }
@@ -263,6 +263,62 @@ impl TermUi {
         }
 
         Ok(None)
+    }
+
+    /// The input field’s block: the title is bolded while the agent awaits a prompt, and not
+    /// bolded while a request is being processed.
+    fn input_block(processing: bool) -> Block<'static> {
+        Block::bordered()
+            .title(" Input ")
+            .title_style(if processing {
+                Style::default()
+            } else {
+                Style::default().bold()
+            })
+    }
+
+    /// Raise a terminal notification that the response is ready and the agent is awaiting a
+    /// new prompt.
+    ///
+    /// Under tmux (detected via `$TERM`) the OSC 99 messages are wrapped in tmux’s
+    /// passthrough envelope (which requires `allow-passthrough on`); otherwise the
+    /// messages are sent bare.
+    fn notify_prompt_done(response: Option<String>) {
+        const TITLE: &str = "Lemon: Turn done, awaiting prompt";
+
+        // Without the leading ESC and the ST terminator: the bare path and the tmux
+        // wrapper both supply them.
+        let title_payload = format!("]99;i=1:d=0;{TITLE}");
+        let body_payload = if let Some(response) = response {
+            let sanitized = response
+                .trim()
+                .chars()
+                .filter_map(|c| match c {
+                    '\n' | '\t' => Some(' '),
+                    '\r' => None,
+                    ';' => Some(','),
+                    c if c.is_ascii_control() => Some('�'),
+                    c => Some(c),
+                })
+                .collect::<String>();
+            format!("]99;i=1:d=1:p=body;{}", sanitized.truncated_display(200))
+        } else {
+            String::from("]99;i=1:d=1:p=body;(Awaiting prompt.)")
+        };
+
+        let seq = if env::var("TERM").is_ok_and(|term| term.starts_with("tmux")) {
+            // Each message wrapped in tmux’s DCS passthrough envelope: the OSC’s leading
+            // ESC is doubled, its ST is spelled as `ESC ESC \`, and the envelope is closed
+            // with `ESC \`.
+            let title_env =
+                format!("\u{1b}Ptmux;\u{1b}\u{1b}{title_payload}\u{1b}\u{1b}\\\u{1b}\\");
+            let body_env = format!("\u{1b}Ptmux;\u{1b}\u{1b}{body_payload}\u{1b}\u{1b}\\\u{1b}\\");
+            format!("{title_env}{body_env}")
+        } else {
+            format!("\u{1b}{title_payload}\u{1b}\\\u{1b}{body_payload}\u{1b}\\")
+        };
+
+        let _ = crossterm::execute!(io::stdout(), crossterm::style::Print(seq));
     }
 
     /// Render the current state onto the screen.
@@ -407,6 +463,8 @@ impl TermUi {
             frame.render_widget(line, layout[i + 1]);
         }
         if let Some(input_cell) = input_cell {
+            self.input_area
+                .set_block(Self::input_block(self.processing));
             frame.render_widget(&self.input_area, input_cell);
         }
 
@@ -478,8 +536,12 @@ impl ui::UiState for TermUi {
             ui::Notification::PromptQueued(p) => self.queued_prompts.push_back(p),
             ui::Notification::PromptSubmitted => {
                 self.queued_prompts.pop_front();
+                self.processing = true;
             }
-            ui::Notification::AwaitingPrompt { response: _ } => (), // Representation to be added later
+            ui::Notification::AwaitingPrompt { response } => {
+                self.processing = false;
+                Self::notify_prompt_done(response);
+            }
             ui::Notification::RequestPermission { prompt, approval } => {
                 self.pending_permissions.push_back((prompt, approval));
             }
