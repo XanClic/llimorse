@@ -62,8 +62,15 @@ impl TaskFile {
 
             write!(
                 message,
-                "\n- '{id}' ({:?}, {:?} priority):\n",
-                task.settable.status, task.settable.priority,
+                "\n- '{id}' ({:?}, {:?} priority):  - Components: {}\n",
+                task.settable.status,
+                task.settable.priority,
+                task.settable
+                    .components
+                    .iter()
+                    .map(|s| s as &str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
             )
             .expect("Failed to append to task list string");
 
