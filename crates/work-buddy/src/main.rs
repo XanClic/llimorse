@@ -80,7 +80,9 @@ derive_merge! {
         session_logs: Option<PathBuf>,
 
         /// Raw session log to resume from. With no value, resumes the newest session log in
-        /// `--session-logs`
+        /// `--session-logs`. A bare file name (no directory part) that is not in the current
+        /// directory is looked up in `--session-logs`, trying `<name>.jsonl` if the name has no
+        /// extension
         #[arg(long, num_args(0..=1), default_missing_value = "", value_parser = Resume::value_parser())]
         #[serde(skip)] // no sense allowing this in a config file
         resume: Option<Resume>,

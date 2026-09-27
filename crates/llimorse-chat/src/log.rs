@@ -6,7 +6,7 @@ use llimorse::ChatListener;
 use llimorse::line_format::ChatMessage;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 use tracing::error;
 
@@ -157,6 +157,10 @@ impl SessionManager {
     ///
     /// The resume target is resolved *before* the new log file is created, so the file created by
     /// this call can never be picked as the newest log.
+    ///
+    /// A `Resume::File` whose path is a bare file name (no directory part) and not found in the
+    /// current directory is looked up in the session-logs directory, if one was given, also
+    /// trying `<name>.jsonl` when the name has no extension.
     pub fn new(session_logs: Option<&Path>, resume: &Resume) -> Result<Self> {
         let history = match resume {
             Resume::Fresh => Vec::new(),
@@ -171,7 +175,8 @@ impl SessionManager {
                 SessionLog::load(&file).map_err(|err| anyhow!("{}: {err}", file.display()))?
             }
             Resume::File(file) => {
-                SessionLog::load(file).map_err(|err| anyhow!("{}: {err}", file.display()))?
+                let file = Self::resolve_resume_file(file, session_logs)?;
+                SessionLog::load(&file).map_err(|err| anyhow!("{}: {err}", file.display()))?
             }
         };
 
@@ -217,6 +222,46 @@ impl SessionManager {
                 dir.display()
             )
         })
+    }
+
+    /// Resolve the file to resume from.
+    ///
+    /// A bare file name (no directory part, i.e. no slash) that does not exist in the current
+    /// directory is looked up in the session-logs directory, if one was given, also trying
+    /// `<name>.jsonl` when the name has no extension. Anything else is used as-is: a path that
+    /// exists nowhere then fails with the natural load error, unless a directory was given and
+    /// the bare name is in neither place, which is its own error.
+    fn resolve_resume_file(file: &Path, session_logs: Option<&Path>) -> Result<PathBuf> {
+        if file.exists() || !Self::is_bare_name(file) {
+            return Ok(file.to_path_buf());
+        }
+        let Some(dir) = session_logs else {
+            return Ok(file.to_path_buf());
+        };
+        let mut candidates = vec![dir.join(file)];
+        if !file.to_string_lossy().ends_with(".jsonl") {
+            candidates.push(dir.join(format!("{}.jsonl", file.display())));
+        }
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Ok(candidate.clone());
+            }
+        }
+        let mut names = vec![file.display().to_string()];
+        if let Some(candidate) = candidates.get(1) {
+            names.push(candidate.display().to_string());
+        }
+        Err(anyhow!(
+            "Session log {} not found (looked in the current directory and in {})",
+            names.join(" or "),
+            dir.display()
+        ))
+    }
+
+    /// A bare file name: exactly one path component, so no directory part (no slash).
+    fn is_bare_name(file: &Path) -> bool {
+        let mut components = file.components();
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
     }
 
     /// A session log file name, timestamped so that names sort chronologically.
@@ -348,6 +393,103 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(files.len(), 2);
+    }
+
+    /// A bare file name that is not in the current directory is looked up in the
+    /// session-logs directory.
+    #[test]
+    fn bare_resume_name_falls_back_to_the_session_logs_dir() {
+        let dir = ScratchDir::new("fallback");
+        dir.write(
+            "session-bare.jsonl",
+            "{\"role\":\"user\",\"content\":\"hi\"}\n",
+        );
+
+        let manager = SessionManager::new(
+            Some(dir.path()),
+            &Resume::File(PathBuf::from("session-bare.jsonl")),
+        )
+        .unwrap();
+        assert_eq!(manager.history.len(), 1);
+    }
+
+    /// A bare file name without an extension is looked up in the session-logs directory with
+    /// `.jsonl` appended.
+    #[test]
+    fn bare_resume_name_without_an_extension_tries_jsonl_in_the_session_logs_dir() {
+        let dir = ScratchDir::new("jsonl-fallback");
+        dir.write(
+            "session-bare.jsonl",
+            "{\"role\":\"user\",\"content\":\"hi\"}\n",
+        );
+
+        let manager = SessionManager::new(
+            Some(dir.path()),
+            &Resume::File(PathBuf::from("session-bare")),
+        )
+        .unwrap();
+        assert_eq!(manager.history.len(), 1);
+    }
+
+    /// A path with a directory part is used as-is: no lookup in the session-logs directory.
+    #[test]
+    fn resume_path_with_a_directory_part_is_used_as_is() {
+        let dir = ScratchDir::new("no-fallback");
+        fs::create_dir(dir.join("inner")).unwrap();
+        fs::write(
+            dir.join("inner").join("session-bare.jsonl"),
+            "{\"role\":\"user\",\"content\":\"hi\"}\n",
+        )
+        .unwrap();
+
+        // The file exists only under the session-logs directory, at a path that does not exist
+        // in the current directory, so the load must fail rather than fall back.
+        let err = SessionManager::new(
+            Some(dir.path()),
+            &Resume::File(PathBuf::from("inner/session-bare.jsonl")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("inner/session-bare.jsonl"));
+    }
+
+    /// A bare name in neither the current directory nor the session-logs directory is an error
+    /// that mentions both places.
+    #[test]
+    fn bare_resume_name_in_neither_place_is_an_error() {
+        let dir = ScratchDir::new("nowhere");
+        let err = SessionManager::new(
+            Some(dir.path()),
+            &Resume::File(PathBuf::from("no-such-session.jsonl")),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no-such-session.jsonl"));
+        assert!(msg.contains(&*dir.path().to_string_lossy()));
+    }
+
+    /// A bare name without an extension, in neither place, is an error that names the `.jsonl`
+    /// candidate that was tried in the session-logs directory as well.
+    #[test]
+    fn bare_resume_name_without_an_extension_in_neither_place_is_an_error() {
+        let dir = ScratchDir::new("nowhere-jsonl");
+        let err = SessionManager::new(
+            Some(dir.path()),
+            &Resume::File(PathBuf::from("no-such-session")),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no-such-session"));
+        assert!(msg.contains("no-such-session.jsonl"));
+        assert!(msg.contains(&*dir.path().to_string_lossy()));
+    }
+
+    /// A bare name that is not found, with no session-logs directory, keeps the natural load
+    /// error.
+    #[test]
+    fn bare_resume_name_without_a_session_logs_dir_is_an_error() {
+        let err = SessionManager::new(None, &Resume::File(PathBuf::from("no-such-session.jsonl")))
+            .unwrap_err();
+        assert!(err.to_string().contains("no-such-session.jsonl"));
     }
 
     /// `Resume::Newest` picks up the newest non-empty log in the directory.
