@@ -307,7 +307,7 @@ impl TermUi {
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         let history_len = chat_history.lines().len();
-        let scroll_len = history_len - history_lines_on_screen;
+        let scroll_len = history_len.saturating_sub(history_lines_on_screen);
         let mut scrollbar_state =
             ScrollbarState::new(scroll_len).position(cmp::min(scroll, scroll_len));
 
