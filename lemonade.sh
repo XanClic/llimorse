@@ -32,8 +32,9 @@
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
-#                             # the worktree (session logs kept) and start
-#                             # from a fresh clone of the checkout
+#                             # the worktree (session logs and shared
+#                             # directory kept) and start from a fresh
+#                             # clone of the checkout
 #   lemonade.sh --ignore-divergence # the worktree holds work this
 #                             # checkout lacks: start on it as-is instead
 #                             # of refusing. Nothing is wiped or
@@ -42,8 +43,8 @@
 #
 # The container runs with --rm: it, its writable layer (runtime dnf
 # installs) and the anonymous volume holding target/ are gone when lemon
-# exits. The worktree and the
-# session logs under ${TMPDIR:-/tmp}/lemon are gone at reboot. A SearXNG
+# exits. The worktree, the session logs and the shared /share directory
+# under ${TMPDIR:-/tmp}/lemon are gone at reboot. A SearXNG
 # sidecar for web_search runs on a private per-session network and dies
 # when the script exits.
 #
@@ -92,11 +93,12 @@ TOPLEVEL=$(git rev-parse --show-toplevel)
 
 # Per-checkout state on tmpfs (or $TMPDIR), under one root: trees/ holds
 # the worktree, sessions/ holds lemon's session logs (the resume handle),
-# both named after the checkout's directory name plus a hash of its
-# top-level path — the basename keeps the name human-readable, the hash
-# keeps sibling checkouts with the same basename from colliding, and
-# subdirectories of one checkout share one state dir. Both die at reboot;
-# a $TMPDIR on disk keeps both.
+# share/ holds the directory mounted at /share for host<->container data
+# exchange; all three named after the checkout's directory name plus a
+# hash of its top-level path — the basename keeps the name human-readable,
+# the hash keeps sibling checkouts with the same basename from colliding,
+# and subdirectories of one checkout share one state dir. All die at
+# reboot; a $TMPDIR on disk keeps all.
 LEMON_ROOT="${TMPDIR:-/tmp}/lemon"
 HASH=$(printf '%s' "$TOPLEVEL" | sha256sum | cut -c1-12)
 KEY="$(basename "$TOPLEVEL")-$HASH"
@@ -105,6 +107,9 @@ WORKTREE="$WORKTREE_ROOT/$KEY"
 SESSIONS_ROOT="$LEMON_ROOT/sessions"
 SESSIONS="$SESSIONS_ROOT/$KEY"
 mkdir -p "$SESSIONS"
+SHARE_ROOT="$LEMON_ROOT/share"
+SHARE_DIR="$SHARE_ROOT/$KEY"
+mkdir -p "$SHARE_DIR"
 # Where the container leaves the session's git state for import_session;
 # empty between sessions.
 XFER="$LEMON_ROOT/xfer/$KEY"
@@ -120,10 +125,12 @@ if [ -d "$OLD_WORKTREE" ] && [ ! -e "$WORKTREE" ]; then
 fi
 
 # Where the pieces live: the worktree is what the container works in, the
-# sessions dir is what --resume reads back.
+# sessions dir is what --resume reads back, the share dir is where files
+# are exchanged between host and container.
 note "State for this checkout lives under $LEMON_ROOT (tmpfs by default; dies at reboot):"
 printf '      Worktree:   %s\n' "$WORKTREE"
 printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESSIONS"
+printf '      Share:      %s (mounted at /share; host<->container data exchange; dies with the rest at reboot)\n' "$SHARE_DIR"
 
 # Argument interception: these flags are lemonade's, not lemon's, so they
 # are consumed here and rewritten for the container; everything else is
@@ -151,7 +158,7 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # --force-fresh: discard the worktree's state — the divergence gate below
 # would refuse to start while it holds un-fetched work — or simply start
 # from a clean slate. Only the worktree directory is wiped; the session
-# logs under $SESSIONS are kept.
+# logs under $SESSIONS and the shared directory under $SHARE_DIR are kept.
 #
 # --ignore-divergence: override the gate's refusal to start while the
 # worktree holds work this checkout lacks. The worktree is started as-is:
@@ -228,7 +235,9 @@ The container itself — including anything you install into it — is deleted w
 the session ends. /work is a copy; when the session ends, its git state is
 carried back to the host for the user to fetch: all branches and tags, HEAD,
 and uncommitted changes, including untracked files. Files ignored by git are
-not carried back.
+not carried back. /share is readable and writable from both the container
+and the host; it is the channel for exchanging files with the user during
+the session.
 
 You are free to do whatever you want. A full development toolchain is
 preinstalled (git, rustup with a nightly toolchain, cargo, make/gcc, python3
@@ -508,7 +517,8 @@ import_session() {
 # --force-fresh first: the flag is an explicit request to destroy whatever
 # is in the worktree — half-dead or not — so it runs before the half-dead
 # check below. Only the worktree directory goes; the session logs under
-# $SESSIONS are kept, they are the --resume handles.
+# $SESSIONS (the --resume handles) and the shared directory under
+# $SHARE_DIR are kept.
 if [ -n "$FORCE_FRESH" ]; then
     note "--force-fresh: removing $WORKTREE and re-cloning from $TOPLEVEL."
     rm -rf "$WORKTREE" "$XFER"
@@ -762,8 +772,14 @@ mkdir -p "$XFER"
 MOUNTS=(-v "$WORKTREE:/work:O"
         -v "$XFER:/xfer:z"
         -v "$SESSIONS:/sessions:z"
+        -v "$SHARE_DIR:/share:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z"
         -v "$ENV_PROMPT:/system-prompt-env.md:ro,z")
+# Shared directory: mounted at /share, readable and writable from both
+# the container and the host — the channel for exchanging files between
+# them during the session. Under $LEMON_ROOT/share like the worktree and
+# session logs, so it dies at reboot with them (a $TMPDIR on disk keeps
+# it).
 # Build artifacts: when the repo root has a Cargo.toml, an anonymous
 # volume at /work/target — cargo's default target directory — so builds
 # land on disk rather than the worktree's tmpfs, and die with the

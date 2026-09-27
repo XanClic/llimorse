@@ -71,11 +71,11 @@ Steps:
    network.
 5. `podman run --rm -it` on that network with the worktree as an overlay
    at `/work` (see The container never writes the worktree below), the
-   export handover directory at `/xfer`, the
-   per-checkout session-log directory at `/sessions`, and the lemon
-   binary bind-mounted — plus the built-in environment description at
-   `/system-prompt-env.md`, always, and the chosen system prompt file at
-   `/system-prompt.md` when one is chosen (see System prompt below) —
+   export handover directory at `/xfer`, the per-checkout session-log
+   directory at `/sessions`, the shared directory at `/share`, and the
+   lemon binary bind-mounted — plus the built-in environment description
+   at `/system-prompt-env.md`, always, and the chosen system prompt file
+   at `/system-prompt.md` when one is chosen (see System prompt below) —
    running `lemon --zesty --llama-url
    http://<LLAMA_HOST>:8080 --searxng-url http://lemonade-searxng-<pid>:8080
    [--session-logs /sessions] "$@"`. The script appends `--session-logs
@@ -240,6 +240,7 @@ Most disposable inside, least outside:
 | session export      | `${TMPDIR:-/tmp}/lemon/xfer/<basename>-<hash>`, mounted at `/xfer` (tmpfs) | the import |
 | worktree (code)     | `${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>` (tmpfs) | reboot |
 | session logs        | `${TMPDIR:-/tmp}/lemon/sessions/<basename>-<hash>`, mounted at `/sessions` (tmpfs) | reboot |
+| shared directory    | `${TMPDIR:-/tmp}/lemon/share/<basename>-<hash>`, mounted at `/share` (tmpfs) | reboot |
 | your checkout       | host disk                      | never |
 
 `target/` is more ephemeral than the code, on disk rather than RAM, and
@@ -287,6 +288,22 @@ forgets a checkout's tree and its sessions together. Deliberate: the log is a re
 iteration, and the iteration's code state is durable only once fetched;
 a fresh tree makes the old conversation stale. A `$TMPDIR` on disk keeps
 both, if a session is meant to outlive a boot.
+
+## The shared directory
+
+Besides the git state, a session may need to exchange plain files with
+the host. /share is a bind mount of the per-checkout directory
+`${TMPDIR:-/tmp}/lemon/share/<basename>-<hash>` — a sibling of the
+worktree and the session logs under the same key — readable and writable
+from both the container and the host, so it is the channel for
+exchanging files with the user during a session, in either direction:
+the user can put files there for the agent to read, and the agent can
+put files there for the user to take. Nothing is carried over at session
+end the way /work's git state is; what is in it when the container
+exits is what is in it when the next session starts.
+
+The lifetime is the worktree's and the session logs': it dies at reboot,
+and a `$TMPDIR` on disk keeps it.
 
 ## System prompt
 
