@@ -92,6 +92,10 @@ derive_merge! {
         #[serde(deserialize_with = "helpers::system_files::deserialize")]
         subagent_system: Vec<PathBuf>,
 
+        /// Maximum number of subagents that may run in parallel [default: unlimited]
+        #[arg(long)]
+        subagent_max_parallel: Option<usize>,
+
         /// File to append log output to, because the terminal is taken by the UI
         /// [default: $TMPDIR/lemon.log]
         #[arg(long)]
@@ -149,6 +153,10 @@ async fn main() -> Result<()> {
         let cfg = fs::read_to_string(file).map_err(|err| anyhow!("{}: {err}", file.display()))?;
         let cfg = toml::from_str(&cfg).map_err(|err| anyhow!("{}: {err}", file.display()))?;
         args.merge_weak(cfg);
+    }
+
+    if let Some(0) = args.subagent_max_parallel {
+        return Err(anyhow!("--subagent-max-parallel must be at least 1"));
     }
 
     let log_path = args
@@ -251,7 +259,7 @@ async fn main() -> Result<()> {
             searxng_url: args.searxng_url.clone(),
         },
         llimorse_chat::SubagentNotifier::new(&ui_notifications),
-        None,
+        args.subagent_max_parallel,
     );
     agent.add_tool(subagent);
 
