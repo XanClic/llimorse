@@ -87,8 +87,13 @@ with `--pull=never`, so an offline run can use the cached copy), a full rebuild
 happens when a release ships, not on every session.
 
 Installed via dnf (one package manager for the whole image): bash,
-ca-certificates, curl, findutils, gcc, gcc-c++, git, glibc-devel, make,
-ninja-build, pkgconf-pkg-config, python3, python3-pip, which, rustup.
+bind-utils, ca-certificates, curl, diffutils, file, findutils, gcc,
+gcc-c++, git, glibc-devel, iproute, jq, lsof, make, netcat, ninja-build,
+patch, pkgconf-pkg-config, procps-ng, python3, python3-pip, ripgrep,
+rsync, socat, strace, tmux, tree, which, zip, rustup. Besides the build
+toolchain, that is the toolbox an agent reaches for without asking:
+text and data tools, network and process inspection, and tmux for
+checking how a TUI renders.
 Rust comes from the Fedora `rustup` package; `rustup-init
 --default-toolchain nightly` performs the toolchain install. A
 `rust-toolchain.toml` in the checkout overrides the default inside the

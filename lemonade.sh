@@ -453,19 +453,35 @@ FROM fedora:latest
 # at runtime (long tail); such installs die with the container (--rm).
 RUN dnf install -y \
         bash \
+        bind-utils \
         ca-certificates \
         curl \
+        diffutils \
+        file \
         findutils \
         gcc \
         gcc-c++ \
         git \
         glibc-devel \
+        iproute \
+        jq \
+        lsof \
         make \
+        netcat \
         ninja-build \
+        patch \
         pkgconf-pkg-config \
+        procps-ng \
         python3 \
         python3-pip \
+        ripgrep \
+        rsync \
+        socat \
+        strace \
+        tmux \
+        tree \
         which \
+        zip \
         rustup \
     && dnf clean all
 
