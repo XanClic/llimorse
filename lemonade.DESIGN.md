@@ -18,6 +18,9 @@ subdirectory; the worktree is keyed on the top-level path):
     ./lemonade.sh                 # lemon --zesty
     ./lemonade.sh <extra args>    # forwarded after --zesty
     ./lemonade.sh --system <host file> # push a system prompt in
+    ./lemonade.sh --resume /sessions/<file> # continue a previous session
+    ./lemonade.sh --force-fresh       # wipe the worktree (session logs
+                                       # kept) and re-clone the checkout
     ./lemonade.sh --ignore-divergence # start on a worktree that holds
                                        # un-fetched work, as-is
 
@@ -61,7 +64,7 @@ Steps:
    binary bind-mounted — plus the system prompt file at
    `/system-prompt.md` when one is chosen (see System prompt below) —
    running `lemon --zesty --llama-url
-   http://<LLAMA_HOST>:8080 --searxng-url http://lemonade-searxng:8080
+   http://<LLAMA_HOST>:8080 --searxng-url http://lemonade-searxng-<pid>:8080
    [--session-logs /sessions] "$@"`. The script appends `--session-logs
    /sessions` unless the caller already passes one, and prints the resume
    command for the newest log when lemon exits (see Session logs and
@@ -78,7 +81,8 @@ writable layer are deleted. That is the whole session-end ritual.
 ## Image (Containerfile embedded in `lemonade.sh`)
 
 `FROM fedora:latest` — Fedora over Arch because Fedora's base is stable
-per release: with `--pull=always` at session start, a full rebuild
+per release: with the base image pulled at session start (then built
+with `--pull=never`, so an offline run can use the cached copy), a full rebuild
 happens when a release ships, not on every session.
 
 Installed via dnf (one package manager for the whole image): bash,
@@ -178,8 +182,8 @@ Most disposable inside, least outside:
 | ------------------- | ------------------------------ | ---------------- |
 | `target/` artifacts | container writable layer, symlinked at `/work/target` | `podman rm` (automatic via `--rm`) |
 | SearXNG sidecar     | container + private network; settings in a `${TMPDIR:-/tmp}` temp file | script exit (EXIT trap) |
-| worktree (code)     | `${TMPDIR:-/tmp}/lemon/trees/<hash>` (tmpfs) | reboot |
-| session logs        | `${TMPDIR:-/tmp}/lemon/sessions/<hash>`, mounted at `/sessions` (tmpfs) | reboot |
+| worktree (code)     | `${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>` (tmpfs) | reboot |
+| session logs        | `${TMPDIR:-/tmp}/lemon/sessions/<basename>-<hash>`, mounted at `/sessions` (tmpfs) | reboot |
 | your checkout       | host disk                      | never |
 
 `target/` is more ephemeral than the code, on disk rather than RAM, and
@@ -220,8 +224,8 @@ file; the resumed file stays as a snapshot. A caller-supplied
 `--session-logs` suppresses both the injection and the hint.
 
 The logs share the worktree's lifetime: they die at reboot, and
-`rm -rf ${TMPDIR:-/tmp}/lemon/<basename>-<hash>` forgets a checkout's
-tree and its sessions together. Deliberate: the log is a record of an
+`rm -rf ${TMPDIR:-/tmp}/lemon/{trees,sessions}/<basename>-<hash>`
+forgets a checkout's tree and its sessions together. Deliberate: the log is a record of an
 iteration, and the iteration's code state is durable only once fetched;
 a fresh tree makes the old conversation stale. A `$TMPDIR` on disk keeps
 both, if a session is meant to outlive a boot.
@@ -243,8 +247,8 @@ not the top-level — is detected and pushed in, `AGENTS.md` first: these
 are where per-project agent instructions already conventionally live, so
 the common case needs no flag, and the vendor-neutral name wins when a
 directory carries both. An explicit `--system` always wins, a
-missing file is a clear error, and no candidate means no `--system` at
-all — lemon's default stands.
+missing file is a clear error before anything is pulled or built, and
+no candidate means no `--system` at all — lemon's default stands.
 
 ## The lemon binary
 
@@ -263,6 +267,11 @@ the host in the meantime. No rebuild of anything is involved.
 
 - A host crash mid-session can leave the session network behind;
   `podman network prune` clears it.
+- The sidecar and network names carry the script's PID
+  (`lemonade-searxng-<pid>`, `lemonade-<pid>`), so sessions in
+  different checkouts never collide. The flip side: a run killed
+  without its EXIT trap (SIGKILL) leaves its sidecar running, and no
+  later run removes it; `podman rm -f lemonade-searxng-<pid>` does.
 - Bind mounts always carry the `:z` SELinux label: a no-op on hosts
   without SELinux, and what an enforcing host needs.
 - The image assumes the host lemon binary is glibc/x86_64, matching

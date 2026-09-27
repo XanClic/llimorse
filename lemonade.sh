@@ -163,6 +163,27 @@ LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
 # is fine: the -x check above guarantees the file exists.)
 LEMON_BIN=$(realpath "$LEMON_BIN")
 
+# System prompt file: resolved here, before any pulling or building, so a
+# mistyped --system fails at once. With no --system, AGENTS.md / CLAUDE.md
+# in the working directory is picked up. Canonicalized to absolute: podman
+# treats a -v source without a leading '/' as a named volume (same trap as
+# LEMON_BIN above). Mounted at /system-prompt.md further down.
+if [ -n "$SYSFILE" ]; then
+    [ -f "$SYSFILE" ] || { err "System prompt file not found: $SYSFILE"; exit 1; }
+else
+    for cand in AGENTS.md CLAUDE.md; do
+        if [ -f "$cand" ]; then
+            SYSFILE="$cand"
+            note "Using $SYSFILE in the working directory as the system prompt"
+            set -- "$@" --system /system-prompt.md
+            break
+        fi
+    done
+fi
+if [ -n "$SYSFILE" ]; then
+    SYSFILE=$(realpath "$SYSFILE")
+fi
+
 # Divergence check: compare this checkout with the worktree and set the
 # globals the divergence gate reads:
 #   WT_AT_RISK=1   the worktree holds commits this checkout lacks (on any
@@ -264,7 +285,7 @@ fi
 if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
     # Half-dead worktree (interrupted clone or partial deletion): git
     # clone would refuse the non-empty dir on this and every later run.
-    err "$WORKTREE exists but is not a git worktree; remove it and retry: rm -rf '$WORKTREE'" >&2
+    err "$WORKTREE exists but is not a git worktree; remove it and retry: rm -rf '$WORKTREE'"
     exit 1
 fi
 
@@ -459,7 +480,9 @@ server:
   secret_key: "local-agent-dev"
 LEMON_SEARXNG_SETTINGS
 
-SEARXNG=lemonade-searxng
+# Both names are per-process, so lemonade sessions in different checkouts
+# never touch each other's sidecar or network.
+SEARXNG="lemonade-searxng-$$"
 NET="lemonade-$$"
 cleanup() {
     podman rm -f "$SEARXNG" >/dev/null 2>&1 || true
@@ -470,7 +493,6 @@ trap cleanup EXIT
 
 NET_ID=$(podman network create "$NET")
 note "Created private network '$NET' (id ${NET_ID:0:12}): only lemon and the SearXNG sidecar share it; it is removed when this script exits"
-podman rm -f "$SEARXNG" >/dev/null 2>&1 || true  # stale container from a crashed run
 SID=$(podman run --rm -d --name "$SEARXNG" --network "$NET" \
     -v "$SEARXNG_SETTINGS:/etc/searxng/settings.yml:ro,z" \
     "$SEARXNG_IMAGE")
@@ -480,21 +502,6 @@ MOUNTS=(-v "$WORKTREE:/work:z"
         -v "$SESSIONS:/sessions:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z")
 if [ -n "$SYSFILE" ]; then
-    [ -f "$SYSFILE" ] || { err "System prompt file not found: $SYSFILE"; exit 1; }
-else
-    for cand in AGENTS.md CLAUDE.md; do
-        if [ -f "$cand" ]; then
-            SYSFILE="$cand"
-            note "Using $SYSFILE in the working directory as the system prompt"
-            set -- "$@" --system /system-prompt.md
-            break
-        fi
-    done
-fi
-if [ -n "$SYSFILE" ]; then
-    # Canonicalize to absolute: podman treats a -v source without a
-    # leading '/' as a named volume (same trap as LEMON_BIN above).
-    SYSFILE=$(realpath "$SYSFILE")
     MOUNTS+=(-v "$SYSFILE:/system-prompt.md:ro,z")
 fi
 
@@ -526,11 +533,14 @@ status=${status:-0}
 # exactly when the resume line is wanted.
 if [ "$hint_resume" -eq 1 ]; then
     newest=""
-    for f in $(ls -1t "$SESSIONS"); do
-        [ -s "$SESSIONS/$f" ] && { newest="$f"; break; }
+    for f in "$SESSIONS"/*; do
+        [ -s "$f" ] || continue
+        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+            newest="$f"
+        fi
     done
     if [ -n "$newest" ]; then
-        note "To continue this conversation: lemonade.sh --resume /sessions/$newest"
+        note "To continue this conversation: lemonade.sh --resume /sessions/${newest##*/}"
     fi
 fi
 
