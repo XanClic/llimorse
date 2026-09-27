@@ -4,8 +4,8 @@ use super::history::{ChatHistory, HistoryEntryType};
 use super::ui::{self, AgentId};
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
-use llimorse::StreamingChunk;
-use llimorse::line_format::ChatMessage;
+use llimorse::line_format::{ChatMessage, ToolCall};
+use llimorse::{Agent, StreamingChunk};
 use std::collections::VecDeque;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -16,14 +16,23 @@ pub(super) struct ChatAgent {
     /// The chat history as shared with the agent
     chat_history: Arc<Mutex<ChatHistory>>,
 
+    /// Notify the UI to redraw
+    ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
+
+    /// Notifications from the application
+    ///
+    /// Generally `Some(_)`, but we need to `.take()` it during tool call execution so we can use
+    /// this mutably while the tool call executor has `&self` borrowed.
+    incoming: Option<Incoming>,
+}
+
+/// Incoming notification processing
+struct Incoming {
     /// Notifications from the application
     notifications: mpsc::UnboundedReceiver<Notification>,
 
     /// User messages queued
     queued_messages: VecDeque<String>,
-
-    /// Notify the UI to redraw
-    ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
 }
 
 /// Notifications to be sent to the agent
@@ -48,8 +57,10 @@ impl ChatAgent {
     ) -> Self {
         ChatAgent {
             chat_history,
-            notifications,
-            queued_messages: VecDeque::new(),
+            incoming: Some(Incoming {
+                notifications,
+                queued_messages: VecDeque::new(),
+            }),
             ui_notifications,
         }
     }
@@ -70,12 +81,14 @@ impl ChatAgent {
     /// The caller **must** submit `self.queued_messages` immediately (because this function
     /// ignores `ForceSubmitQueued`, assuming the caller will do so).
     async fn process_notifications(&mut self) -> bool {
-        while let Some(notification) = self.notifications.recv().await {
+        let incoming = self.incoming.as_mut().expect("Notifications object taken");
+
+        while let Some(notification) = incoming.notifications.recv().await {
             match notification {
                 Notification::Exit => return false,
 
                 Notification::QueuePrompt(p) => {
-                    self.queued_messages.push_back(p);
+                    incoming.queued_messages.push_back(p);
                     return true;
                 }
 
@@ -94,11 +107,13 @@ impl ChatAgent {
     /// The caller **must** submit `self.queued_messages` immediately (because this function
     /// ignores `ForceSubmitQueued`, assuming the caller will do so).
     fn process_available_notifications(&mut self) -> bool {
-        while let Ok(notification) = self.notifications.try_recv() {
+        let incoming = self.incoming.as_mut().expect("Notifications object taken");
+
+        while let Ok(notification) = incoming.notifications.try_recv() {
             match notification {
                 Notification::Exit => return false,
 
-                Notification::QueuePrompt(p) => self.queued_messages.push_back(p),
+                Notification::QueuePrompt(p) => incoming.queued_messages.push_back(p),
 
                 // Ignore this, the caller will submit them all right now anyway.
                 Notification::ForceSubmitQueued => (),
@@ -110,9 +125,14 @@ impl ChatAgent {
 
     /// Push all messages currently in `self.queued_messages` onto the agent/chat history.
     ///
+    /// Return if there were any messages.
+    ///
     /// This does not yet submit a request to the agent.
-    fn submit_queued_user_messages(&mut self, agent: &mut llimorse::Agent) {
-        let messages = mem::take(&mut self.queued_messages);
+    fn submit_queued_user_messages(&mut self, agent: &mut llimorse::Agent) -> bool {
+        let incoming = self.incoming.as_mut().expect("Notifications object taken");
+
+        let messages = mem::take(&mut incoming.queued_messages);
+        let any_messages = !messages.is_empty();
         for message in messages {
             let _ = self
                 .ui_notifications
@@ -120,6 +140,8 @@ impl ChatAgent {
             self.push_history(&message, HistoryEntryType::User);
             agent.push_user(message);
         }
+
+        any_messages
     }
 
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
@@ -131,6 +153,8 @@ impl ChatAgent {
                 let mut streaming = agent.submit().await?;
 
                 loop {
+                    let incoming = self.incoming.as_mut().expect("Notifications object taken");
+
                     futures::select! {
                         chunk = streaming.next() => {
                             if let Some(chunk) = chunk {
@@ -140,60 +164,60 @@ impl ChatAgent {
                             }
                         }
 
-                        notification = self.notifications.recv().fuse() => {
-                            if let Some(notification) = notification {
-                                 match notification {
-                                     Notification::Exit => return Ok(()),
-                                     Notification::QueuePrompt(p) => {
-                                         self.queued_messages.push_back(p);
-                                     }
-                                     Notification::ForceSubmitQueued => {
-                                        streaming.force_finalize();
-                                        break;
-                                     }
-                                 }
-                            }
+                        exit = incoming.wait_for_abort().fuse() => if exit {
+                            return Ok(())
+                        } else {
+                            streaming.force_finalize();
+                            break;
                         }
                     }
                 }
 
                 drop(streaming);
 
-                let mut pending = agent
-                    .execute_pending_calls(
-                        |agent, call| {
-                            self.push_history(
-                                &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
-                                HistoryEntryType::ToolCall,
-                            );
-                            Ok(())
-                        },
-                        |agent, call, result| {
-                            let name = call.call.name();
-                            let id = &call.id;
-                            match result {
-                                Ok(result) => self.push_history(
-                                    &format!(
-                                        "=[{name}/{id}]=> {}\n",
-                                        agent.display_call_result(&call.call, result)
-                                    ),
-                                    HistoryEntryType::ToolResultOk,
-                                ),
-                                Err(err) => self.push_history(
-                                    &format!("=[{name}/{id}]=> {err}\n"),
-                                    HistoryEntryType::ToolResultErr,
-                                ),
-                            }
-                            Ok(())
-                        },
-                    )
-                    .await;
+                let mut incoming = self.incoming.take().expect("Notifications object taken");
+
+                let check_calls = |agent: &Agent, call: &ToolCall| {
+                    self.push_history(
+                        &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
+                        HistoryEntryType::ToolCall,
+                    );
+                    Ok(())
+                };
+
+                let check_results = |agent: &Agent, call: &ToolCall, result: &Result<String>| {
+                    let name = call.call.name();
+                    let id = &call.id;
+                    match result {
+                        Ok(result) => self.push_history(
+                            &format!(
+                                "=[{name}/{id}]=> {}\n",
+                                agent.display_call_result(&call.call, result)
+                            ),
+                            HistoryEntryType::ToolResultOk,
+                        ),
+                        Err(err) => self.push_history(
+                            &format!("=[{name}/{id}]=> {err}\n"),
+                            HistoryEntryType::ToolResultErr,
+                        ),
+                    }
+                    Ok(())
+                };
+
+                let mut pending = futures::select! {
+                    pending = agent.execute_pending_calls(check_calls, check_results).fuse() => pending,
+                    exit = incoming.wait_for_abort().fuse() => if exit {
+                        return Ok(());
+                    } else {
+                        false // not pending by itself, unless there are actually user messages
+                    }
+                };
+                self.incoming = Some(incoming);
 
                 if !self.process_available_notifications() {
                     return Ok(());
                 }
-                if !self.queued_messages.is_empty() {
-                    self.submit_queued_user_messages(&mut agent);
+                if self.submit_queued_user_messages(&mut agent) {
                     pending = true;
                 }
 
@@ -242,5 +266,26 @@ impl ChatAgent {
         let _ = self.ui_notifications.send(ui::Notification::UpdateAgent {
             agent_id: AgentId::Main,
         });
+    }
+}
+
+impl Incoming {
+    /// Process all available incoming notifications, until any abort notification is received
+    ///
+    /// Abort notifications are `Exit` and `ForceSubmitQueued`, or the channel being closed.
+    ///
+    /// Return `true` if we need to exit, `false` if we just need to abort and submit everything
+    /// that’s queued.
+    async fn wait_for_abort(&mut self) -> bool {
+        while let Some(notification) = self.notifications.recv().await {
+            match notification {
+                Notification::Exit => return true,
+                Notification::ForceSubmitQueued => return false,
+
+                Notification::QueuePrompt(p) => self.queued_messages.push_back(p),
+            }
+        }
+
+        true
     }
 }

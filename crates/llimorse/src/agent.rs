@@ -301,6 +301,10 @@ impl Agent {
     ) -> bool {
         self.client.state_mut().operation_stage = AgentStage::ToolExecution;
 
+        // TODO: We need to create an object here that auto-pushes [CANCELED] tool call errors in
+        // case the future is dropped before we get to push real results. It would also need to
+        // have access to `results` and push the already-finished tool call results.
+
         let mut results = Vec::<ChatMessage>::with_capacity(self.pending_calls.len());
         let mut futs = FuturesUnordered::new();
         for call in mem::take(&mut self.pending_calls) {
