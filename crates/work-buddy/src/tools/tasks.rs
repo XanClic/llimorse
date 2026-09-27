@@ -283,7 +283,7 @@ impl TaskAdd {
 }
 
 impl CallableTool for TaskAdd {
-    async fn execute(&self, params: TaskAddParams) -> Result<TaskAddResult> {
+    async fn execute(&self, _agent: &Agent, params: TaskAddParams) -> Result<TaskAddResult> {
         let mut file = self.file.lock().await;
 
         if file.content.contains_key(&params.id) {
@@ -352,7 +352,7 @@ impl TaskRemove {
 }
 
 impl CallableTool for TaskRemove {
-    async fn execute(&self, params: TaskRemoveParams) -> Result<TaskRemoveResult> {
+    async fn execute(&self, _agent: &Agent, params: TaskRemoveParams) -> Result<TaskRemoveResult> {
         let mut file = self.file.lock().await;
 
         file.content
@@ -460,7 +460,7 @@ impl TaskUpdate {
 }
 
 impl CallableTool for TaskUpdate {
-    async fn execute(&self, params: TaskUpdateParams) -> Result<TaskUpdateResult> {
+    async fn execute(&self, _agent: &Agent, params: TaskUpdateParams) -> Result<TaskUpdateResult> {
         let mut file = self.file.lock().await;
 
         let task = file
@@ -587,7 +587,7 @@ impl TaskQuery {
 }
 
 impl CallableTool for TaskQuery {
-    async fn execute(&self, params: TaskQueryParams) -> Result<TaskQueryResult> {
+    async fn execute(&self, _agent: &Agent, params: TaskQueryParams) -> Result<TaskQueryResult> {
         let file = self.file.lock().await;
 
         let list = file

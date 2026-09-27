@@ -3,7 +3,7 @@
 use super::ToolGate;
 use anyhow::{Result, anyhow, bail};
 use helpers::TruncatedDisplay;
-use llimorse::CallableTool;
+use llimorse::{Agent, CallableTool};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read as _, Seek as _, Write as _};
@@ -72,7 +72,7 @@ impl<G: ToolGate> View<G> {
 }
 
 impl<G: ToolGate> CallableTool for View<G> {
-    async fn execute(&self, params: ViewParams) -> Result<ViewResult> {
+    async fn execute(&self, _agent: &Agent, params: ViewParams) -> Result<ViewResult> {
         self.gate
             .permitted(&params)
             .await
@@ -181,7 +181,7 @@ impl<G: ToolGate> Write<G> {
 }
 
 impl<G: ToolGate> CallableTool for Write<G> {
-    async fn execute(&self, params: WriteParams) -> Result<WriteResult> {
+    async fn execute(&self, _agent: &Agent, params: WriteParams) -> Result<WriteResult> {
         self.gate
             .permitted(&params)
             .await
@@ -270,7 +270,7 @@ impl<G: ToolGate> Edit<G> {
 }
 
 impl<G: ToolGate> CallableTool for Edit<G> {
-    async fn execute(&self, params: EditParams) -> Result<EditResult> {
+    async fn execute(&self, _agent: &Agent, params: EditParams) -> Result<EditResult> {
         self.gate
             .permitted(&params)
             .await

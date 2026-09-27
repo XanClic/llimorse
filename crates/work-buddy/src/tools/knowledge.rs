@@ -141,7 +141,11 @@ impl KnowledgeUpsert {
 }
 
 impl CallableTool for KnowledgeUpsert {
-    async fn execute(&self, params: KnowledgeUpsertParams) -> Result<KnowledgeUpsertResult> {
+    async fn execute(
+        &self,
+        _agent: &Agent,
+        params: KnowledgeUpsertParams,
+    ) -> Result<KnowledgeUpsertResult> {
         if params.content.is_none() && params.add_aliases.is_none() {
             return Err(anyhow!("Must update content or add aliases"));
         }
@@ -287,7 +291,11 @@ impl KnowledgeQuery {
 }
 
 impl CallableTool for KnowledgeQuery {
-    async fn execute(&self, params: KnowledgeQueryParams) -> Result<KnowledgeQueryResult> {
+    async fn execute(
+        &self,
+        _agent: &Agent,
+        params: KnowledgeQueryParams,
+    ) -> Result<KnowledgeQueryResult> {
         let db = self.db.lock().await;
 
         let Some(key) = params.keyword else {

@@ -3,7 +3,7 @@
 use super::ToolGate;
 use anyhow::{Result, anyhow};
 use helpers::TruncatedDisplay;
-use llimorse::CallableTool;
+use llimorse::{Agent, CallableTool};
 use std::fmt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -70,7 +70,7 @@ impl fmt::Display for BashResult {
 }
 
 impl<G: ToolGate> CallableTool for Bash<G> {
-    async fn execute(&self, params: BashParams) -> Result<BashResult> {
+    async fn execute(&self, _agent: &Agent, params: BashParams) -> Result<BashResult> {
         self.gate
             .permitted(&params)
             .await

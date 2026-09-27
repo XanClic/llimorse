@@ -263,7 +263,7 @@ impl WorklogAdd {
 }
 
 impl CallableTool for WorklogAdd {
-    async fn execute(&self, params: WorklogAddParams) -> Result<WorklogAddResult> {
+    async fn execute(&self, _agent: &Agent, params: WorklogAddParams) -> Result<WorklogAddResult> {
         let summary = params.entry.summary.clone();
         let mut storage = self.storage.lock().await;
         storage.push(params.entry)?;
@@ -352,7 +352,11 @@ impl WorklogQuery {
 }
 
 impl CallableTool for WorklogQuery {
-    async fn execute(&self, params: WorklogQueryParams) -> Result<WorklogQueryResult> {
+    async fn execute(
+        &self,
+        _agent: &Agent,
+        params: WorklogQueryParams,
+    ) -> Result<WorklogQueryResult> {
         let start = NaiveDate::parse_from_str(&params.start_date, "%Y-%m-%d")
             .map_err(|err| anyhow!("Failed to parse start_date parameter: {err}"))?;
         let end = NaiveDate::parse_from_str(&params.end_date, "%Y-%m-%d")

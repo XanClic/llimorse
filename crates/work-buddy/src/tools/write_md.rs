@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use helpers::TruncatedDisplay;
-use llimorse::CallableTool;
+use llimorse::{Agent, CallableTool};
 use std::io::Write;
 use std::path::PathBuf;
 use std::{fmt, fs};
@@ -71,7 +71,11 @@ impl WriteMarkdown {
 }
 
 impl CallableTool for WriteMarkdown {
-    async fn execute(&self, params: WriteMarkdownParams) -> Result<WriteMarkdownResult> {
+    async fn execute(
+        &self,
+        _agent: &Agent,
+        params: WriteMarkdownParams,
+    ) -> Result<WriteMarkdownResult> {
         let path = self.dir.join(&params.filename);
         let mut file = fs::File::create_new(&path)
             .map_err(|err| anyhow!("Failed to create {}: {err}", path.display()))?;

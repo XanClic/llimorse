@@ -111,6 +111,7 @@ pub trait Tool: fmt::Debug + Send {
     /// Execute this tool, arguments given in JSON format (unparsed)
     fn execute_unparsed<'a>(
         &'a self,
+        agent: &'a Agent,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + 'a>>;
 
@@ -140,6 +141,7 @@ pub trait CallableTool: ToolState {
     /// Execute a tool call.
     async fn execute(
         &self,
+        agent: &Agent,
         arguments: <Self as ToolState>::ParamType,
     ) -> Result<<Self as ToolState>::ResultType>;
 }
@@ -340,7 +342,7 @@ impl Agent {
                     .get(function.name.as_str())
                     .ok_or_else(|| anyhow!("No such function: {}", function.name))?;
 
-                state.execute_unparsed(&function.arguments).await
+                state.execute_unparsed(self, &function.arguments).await
             }
 
             ToolCallParams::Custom { custom } => bail!("No such tool: {}", custom.name),

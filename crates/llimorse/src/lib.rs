@@ -93,11 +93,12 @@ macro_rules! tool {
 
             fn execute_unparsed<'a>(
                 &'a self,
+                agent: &'a $crate::agent::Agent,
                 arguments: &'a str,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + 'a>> {
                 Box::pin(async move {
                     let params: $param_name = serde_json::from_str(arguments)?;
-                    let result: $result_name = <Self as $crate::agent::CallableTool>::execute(self, params).await?;
+                    let result: $result_name = <Self as $crate::agent::CallableTool>::execute(self, agent, params).await?;
                     Ok(serde_json::to_string(&result)?.to_string())
                 })
             }

@@ -1,7 +1,7 @@
 //! A web_search tool using SearXNG
 
 use anyhow::{Context, Result, anyhow};
-use llimorse::CallableTool;
+use llimorse::{Agent, CallableTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -60,7 +60,11 @@ impl WebSearch {
 }
 
 impl CallableTool for WebSearch {
-    async fn execute(&self, arguments: WebSearchParams) -> Result<WebSearchResults> {
+    async fn execute(
+        &self,
+        _agent: &Agent,
+        arguments: WebSearchParams,
+    ) -> Result<WebSearchResults> {
         let searxng_url = format!(
             "{}/search?q={}&format=json&categories=general",
             self.searxng_url_base,
