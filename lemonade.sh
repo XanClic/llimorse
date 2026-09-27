@@ -23,8 +23,9 @@
 #                             # re-cloned; the work still dies at reboot
 #                             # until fetched
 #
-# The container runs with --rm: it and its writable layer (target/,
-# runtime dnf installs) are gone when lemon exits. The worktree and the
+# The container runs with --rm: it, its writable layer (runtime dnf
+# installs) and the anonymous volume holding target/ are gone when lemon
+# exits. The worktree and the
 # session logs under ${TMPDIR:-/tmp}/lemon are gone at reboot. A SearXNG
 # sidecar for web_search runs on a private per-session network and dies
 # when the script exits.
@@ -448,18 +449,13 @@ RUN dnf install -y \
 # precedence inside the tree (rustup resolves per directory).
 RUN rustup-init -y --default-toolchain nightly
 
-# Build artifacts: when the repo root has a Cargo.toml, the entrypoint
-# symlinks /work/target — cargo's default target directory — to the
-# writable-layer /target, so builds land on the container's writable
-# layer (disk, not the worktree's tmpfs) and die with the container.
-# A symlink rather than a bind mount: mounting would need CAP_SYS_ADMIN,
-# which a coding agent should not get. Deliberately no CARGO_TARGET_DIR:
+# Build artifacts: lemonade.sh mounts an anonymous volume at /work/target
+# for Cargo repos (see MOUNTS there). Deliberately no CARGO_TARGET_DIR:
 # the target repo's own cargo config must not be overridden.
 ENV PATH="/root/.cargo/bin:${PATH}"
-ENV WORKTREE=/work
 
 # "$@" is what lemonade.sh passes (lemon --zesty ...).
-ENTRYPOINT ["/bin/sh", "-c", "if [ -d \"$WORKTREE\" ] && [ -f \"$WORKTREE/Cargo.toml\" ]; then mkdir -p /target && rm -rf \"$WORKTREE/target\" && ln -s /target \"$WORKTREE/target\"; fi; if [ $# -eq 0 ]; then exec bash; fi; exec \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "if [ $# -eq 0 ]; then exec bash; fi; exec \"$@\"", "--"]
 LEMON_CONTAINERFILE
 
 # SearXNG sidecar (lemon's web_search tool): private per-session network,
@@ -501,6 +497,22 @@ note "SearXNG sidecar running — lemon's web_search backend (container '$SEARXN
 MOUNTS=(-v "$WORKTREE:/work:z"
         -v "$SESSIONS:/sessions:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z")
+# Build artifacts: when the repo root has a Cargo.toml, an anonymous
+# volume at /work/target — cargo's default target directory — so builds
+# land on disk rather than the worktree's tmpfs, and die with the
+# container (--rm removes anonymous volumes). Podman sets the mount up
+# at container start, so the container needs no CAP_SYS_ADMIN. On the
+# host, the worktree only gets an empty target/ mount point, which git
+# ignores.
+if [ -f "$WORKTREE/Cargo.toml" ]; then
+    # Worktrees from before the volume carry a target -> /target symlink
+    # made by the old entrypoint; podman would resolve the mount
+    # destination through it.
+    if [ -L "$WORKTREE/target" ]; then
+        rm "$WORKTREE/target"
+    fi
+    MOUNTS+=(-v /work/target)
+fi
 if [ -n "$SYSFILE" ]; then
     MOUNTS+=(-v "$SYSFILE:/system-prompt.md:ro,z")
 fi

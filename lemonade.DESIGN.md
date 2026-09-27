@@ -180,24 +180,26 @@ Most disposable inside, least outside:
 
 | what                | where                          | dies with        |
 | ------------------- | ------------------------------ | ---------------- |
-| `target/` artifacts | container writable layer, symlinked at `/work/target` | `podman rm` (automatic via `--rm`) |
+| `target/` artifacts | anonymous podman volume mounted at `/work/target` | `podman rm` (automatic via `--rm`) |
 | SearXNG sidecar     | container + private network; settings in a `${TMPDIR:-/tmp}` temp file | script exit (EXIT trap) |
 | worktree (code)     | `${TMPDIR:-/tmp}/lemon/trees/<basename>-<hash>` (tmpfs) | reboot |
 | session logs        | `${TMPDIR:-/tmp}/lemon/sessions/<basename>-<hash>`, mounted at `/sessions` (tmpfs) | reboot |
 | your checkout       | host disk                      | never |
 
 `target/` is more ephemeral than the code, on disk rather than RAM, and
-inside the container it appears where cargo expects it: the entrypoint
-symlinks `/work/target` to the writable-layer `/target` — but only when
-the repo root has a `Cargo.toml`, since the redirect is cargo-specific;
-other repos get no symlink and no empty `target/` dir. It is a symlink,
-not a mount: the writable layer isn't addressable from the host, and
-mounting it inside the container would need CAP_SYS_ADMIN, which a
-coding agent should not get. On the host the worktree's `target` is a
-dangling symlink whose point only exists inside the container's mount
-namespace; git ignores it when the checkout's `.gitignore` matches a
-file (as cargo's own default, `/target`, does), though a `target/`-only
-pattern would leave it visible as untracked.
+inside the container it appears where cargo expects it: `podman run`
+gets `-v /work/target`, an anonymous volume (in podman's volume storage
+on disk) mounted over cargo's default target directory — but only when
+the repo root has a `Cargo.toml`, since the redirect is cargo-specific.
+Podman sets the mount up at container start, nested inside the `/work`
+bind mount, so the container needs no CAP_SYS_ADMIN (which mounting
+from inside would, and which a coding agent should not get); `--rm`
+deletes anonymous volumes along with the container. On the host the
+worktree only gets an empty `target/` mount point, which git ignores
+regardless of `.gitignore`. Worktrees from before the volume carry a
+`target -> /target` symlink left by the old entrypoint; the script
+removes it before mounting, since podman would resolve the mount
+destination through it.
 
 The worktree hash is a sha256 prefix of the checkout's top-level path
 (not the basename) so two checkouts with the same directory name don't
