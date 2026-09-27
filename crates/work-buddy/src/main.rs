@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
         agent,
         &manager.history,
         llimorse_chat::ui::NotificationChannel::new(),
-        |agent, history| Ok(TermUi::new(agent, history)),
+        |agent, history| Ok(TermUi::new("WorkBuddy", agent, history)),
     )?;
 
     app.run().await

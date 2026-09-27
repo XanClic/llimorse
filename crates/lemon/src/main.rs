@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
         agent,
         &manager.history,
         ui_notifications,
-        |agent, history| Ok(TermUi::new(agent, history)),
+        |agent, history| Ok(TermUi::new("Lemon", agent, history)),
     )?;
 
     app.run().await

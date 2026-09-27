@@ -66,6 +66,9 @@ pub struct TermUi {
     /// Only the first one is shown; the rest wait their turn.
     pending_permissions: VecDeque<(String, oneshot::Sender<std::result::Result<(), String>>)>,
 
+    /// The application name to use e.g. for notifications
+    app_name: String,
+
     /// When the object was created, purely for visual purposes
     creation: Instant,
 }
@@ -110,8 +113,9 @@ struct SubagentState {
 }
 
 impl TermUi {
-    /// Create the term state with `chat_history`
-    pub fn new(agent: &Agent, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
+    /// Create the term state with `chat_history`, for `agent`, with the application name
+    /// `app_name` (e.g. for notifications).
+    pub fn new(app_name: &str, agent: &Agent, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
         let term = ratatui::init();
         set_up_term();
 
@@ -131,6 +135,7 @@ impl TermUi {
             queued_prompts: VecDeque::new(),
             processing: false,
             pending_permissions: VecDeque::new(),
+            app_name: app_name.to_string(),
             creation: Instant::now(),
         }
     }
@@ -284,12 +289,10 @@ impl TermUi {
     /// Under tmux (detected via `$TERM`) the OSC 99 messages are wrapped in tmux’s
     /// passthrough envelope (which requires `allow-passthrough on`); otherwise the
     /// messages are sent bare.
-    fn notify_prompt_done(response: Option<String>) {
-        const TITLE: &str = "Lemon: Turn done, awaiting prompt";
-
+    fn notify_prompt_done(&self, response: Option<String>) {
         // Without the leading ESC and the ST terminator: the bare path and the tmux
         // wrapper both supply them.
-        let title_payload = format!("]99;i=1:d=0;{TITLE}");
+        let title_payload = format!("]99;i=1:d=0;{}: Turn done, awaiting prompt", self.app_name);
         let body_payload = if let Some(response) = response {
             let sanitized = response
                 .trim()
@@ -541,7 +544,7 @@ impl ui::UiState for TermUi {
             }
             ui::Notification::AwaitingPrompt { response } => {
                 self.processing = false;
-                Self::notify_prompt_done(response);
+                self.notify_prompt_done(response);
             }
             ui::Notification::RequestPermission { prompt, approval } => {
                 self.pending_permissions.push_back((prompt, approval));
