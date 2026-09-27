@@ -25,11 +25,10 @@ use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::num::Saturating;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::{cmp, io};
+use std::{cmp, fmt, io};
 use tokio::sync::oneshot;
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
@@ -293,37 +292,16 @@ impl TermUi {
             lines: history_lines,
         };
 
-        let client_state = self.client_state();
-        let stage = self.animated_stage_emoji(client_state.operation_stage);
-
-        let tokens = client_state.token_usage.sum();
-        let target_suffix = if let Some(prefill_target) = client_state.token_usage.prefill_target
-            && client_state.operation_stage == AgentStage::Prefill
-        {
-            Cow::Owned(format!("… [{:.1}k]", prefill_target as f32 * 1.0e-3))
-        } else if client_state.operation_stage.is_processing() {
-            Cow::Borrowed("…")
-        } else {
-            Cow::Borrowed("")
-        };
-
-        let title = if let Some(context_size) = self.client_info.context_size {
-            format!(
-                " {} {stage} {:.1}k{target_suffix} / {:.1}k ",
-                self.client_info.model_name,
-                tokens as f32 * 1.0e-3,
-                context_size as f32 * 1.0e-3,
-            )
-        } else {
-            format!(
-                " {} {stage} {:.1}k{target_suffix} ",
-                self.client_info.model_name,
-                tokens as f32 * 1.0e-3,
-            )
-        };
         let paragraph = Paragraph::new(paragraph_content).block(
             Block::bordered()
-                .title(title)
+                .title(format!(
+                    " {} ",
+                    AgentStatsDisplay {
+                        state: &self.client_state,
+                        info: &self.client_info,
+                        time_ref: self.creation,
+                    }
+                ))
                 .title_style(Style::new().bold()),
         );
 
@@ -389,41 +367,6 @@ impl TermUi {
         let popup_area = area.centered(Constraint::Length(width), Constraint::Length(height));
         frame.render_widget(Clear, popup_area); // clear what is underneath
         frame.render_widget(paragraph, popup_area);
-    }
-
-    /// Return a representative emoji of the current stage, animated
-    ///
-    /// Specifically the stages where there is no visible text generation in the output window
-    /// (i.e. all phases but reasoning and response generation) should have animated emoji, so the
-    /// user knows we are not stuck. The exception of course is the idle (awaiting prompt) phase,
-    /// where an animation would be distracting.
-    fn animated_stage_emoji(&self, stage: AgentStage) -> &'static str {
-        let animation_phase = self.creation.elapsed().as_secs();
-
-        match stage {
-            AgentStage::Idle => "🟢",
-            AgentStage::Prefill => match animation_phase % 6 {
-                0 | 2 | 4 => "⏳",
-                1 => "🧪",
-                3 => "⚗️",
-                _ => "☕",
-            },
-            AgentStage::Reasoning => "🤔",
-            AgentStage::ResponseGeneration => "🗣️",
-            AgentStage::ToolCallGeneration => match animation_phase % 2 {
-                0 => "🧨",
-                _ => "💥",
-            },
-            AgentStage::ToolExecution => match animation_phase % 2 {
-                0 => "🎆",
-                _ => "✨",
-            },
-        }
-    }
-
-    /// Return the current client state object
-    fn client_state(&self) -> impl Deref<Target = ClientState> {
-        self.client_state.read()
     }
 }
 
@@ -528,6 +471,84 @@ fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
         HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
         HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
         HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
+    }
+}
+
+/// Helper struct to display agent/client stats
+struct AgentStatsDisplay<'a> {
+    /// Client/agent state to display
+    state: &'a RwLock<ClientState>,
+    /// Client/agent info to display (immutable state)
+    info: &'a ClientInfo,
+    /// An arbitrary fixed point in time to animate spinners
+    time_ref: Instant,
+}
+
+impl AgentStatsDisplay<'_> {
+    /// Return a representative emoji of the current stage, animated
+    ///
+    /// Specifically the stages where there is no visible text generation in the output window
+    /// (i.e. all phases but reasoning and response generation) should have animated emoji, so the
+    /// user knows we are not stuck. The exception of course is the idle (awaiting prompt) phase,
+    /// where an animation would be distracting.
+    fn animated_stage_emoji(&self, stage: AgentStage) -> &'static str {
+        let animation_phase = self.time_ref.elapsed().as_secs();
+
+        match stage {
+            AgentStage::Idle => "🟢",
+            AgentStage::Prefill => match animation_phase % 6 {
+                0 | 2 | 4 => "⏳",
+                1 => "🧪",
+                3 => "⚗️",
+                _ => "☕",
+            },
+            AgentStage::Reasoning => "🤔",
+            AgentStage::ResponseGeneration => "🗣️",
+            AgentStage::ToolCallGeneration => match animation_phase % 2 {
+                0 => "🧨",
+                _ => "💥",
+            },
+            AgentStage::ToolExecution => match animation_phase % 2 {
+                0 => "🎆",
+                _ => "✨",
+            },
+        }
+    }
+}
+
+impl fmt::Display for AgentStatsDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.read();
+
+        let stage = self.animated_stage_emoji(state.operation_stage);
+
+        let tokens = state.token_usage.sum();
+        let target_suffix = if let Some(prefill_target) = state.token_usage.prefill_target
+            && state.operation_stage == AgentStage::Prefill
+        {
+            Cow::Owned(format!("… [{:.1}k]", prefill_target as f32 * 1.0e-3))
+        } else if state.operation_stage.is_processing() {
+            Cow::Borrowed("…")
+        } else {
+            Cow::Borrowed("")
+        };
+
+        if let Some(context_size) = self.info.context_size {
+            write!(
+                f,
+                " {} {stage} {:.1}k{target_suffix} / {:.1}k ",
+                self.info.model_name,
+                tokens as f32 * 1.0e-3,
+                context_size as f32 * 1.0e-3,
+            )
+        } else {
+            write!(
+                f,
+                " {} {stage} {:.1}k{target_suffix} ",
+                self.info.model_name,
+                tokens as f32 * 1.0e-3,
+            )
+        }
     }
 }
 
