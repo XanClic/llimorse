@@ -268,13 +268,14 @@ impl TermUi {
     /// The input field’s block: the title is bolded while the agent awaits a prompt, and not
     /// bolded while a request is being processed.
     fn input_block(processing: bool) -> Block<'static> {
+        let input_title_style = if processing {
+            Style::default()
+        } else {
+            Style::default().bold()
+        };
         Block::bordered()
-            .title(" Input ")
-            .title_style(if processing {
-                Style::default()
-            } else {
-                Style::default().bold()
-            })
+            .title(Line::from(" Input ").style(input_title_style))
+            .title_bottom(Line::from(" [Ctrl-C to quit] ").right_aligned())
     }
 
     /// Raise a terminal notification that the response is ready and the agent is awaiting a
