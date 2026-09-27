@@ -9,6 +9,7 @@ use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
 use llimorse::Agent;
+use llimorse::agent::AgentStage;
 use llimorse::client::ClientState;
 use llimorse_chat::history::HistoryEntryType;
 use llimorse_chat::{ChatHistory, ui};
@@ -22,6 +23,7 @@ use std::collections::VecDeque;
 use std::num::Saturating;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::{cmp, io};
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
@@ -57,6 +59,9 @@ pub struct TermUi {
 
     /// Messages that are queued for sending
     queued_prompts: VecDeque<String>,
+
+    /// When the object was created, purely for visual purposes
+    creation: Instant,
 }
 
 impl TermUi {
@@ -83,6 +88,7 @@ impl TermUi {
             history_lines_on_screen: 0,
             input_area,
             queued_prompts: VecDeque::new(),
+            creation: Instant::now(),
         }
     }
 
@@ -259,16 +265,17 @@ impl TermUi {
         };
 
         let tokens = self.client_state.token_usage.sum();
+        let stage = self.animated_stage_emoji();
         let title = if let Some(context_size) = self.client_state.context_size {
             format!(
-                " {}: {:.1}k / {:.1}k ",
+                " {} {stage} {:.1}k / {:.1}k ",
                 self.client_state.model_name,
                 tokens as f32 * 1.0e-3,
                 context_size as f32 * 1.0e-3,
             )
         } else {
             format!(
-                " {}: {:.1}k ",
+                " {} {stage} {:.1}k ",
                 self.client_state.model_name,
                 tokens as f32 * 1.0e-3,
             )
@@ -306,6 +313,36 @@ impl TermUi {
             frame.render_widget(line, layout[i + 1]);
         }
         frame.render_widget(&self.input_area, input_cell);
+    }
+
+    /// Return a representative emoji of the current stage, animated
+    ///
+    /// Specifically the stages where there is no visible text generation in the output window
+    /// (i.e. all phases but reasoning and response generation) should have animated emoji, so the
+    /// user knows we are not stuck. The exception of course is the idle (awaiting prompt) phase,
+    /// where an animation would be distracting.
+    fn animated_stage_emoji(&self) -> &'static str {
+        let animation_phase = self.creation.elapsed().as_secs();
+
+        match self.client_state.operation_stage.load(Ordering::Relaxed) {
+            AgentStage::Idle => "🟢",
+            AgentStage::Prefill => match animation_phase % 6 {
+                0 | 2 | 4 => "⏳",
+                1 => "🧪",
+                3 => "⚗️",
+                _ => "☕",
+            },
+            AgentStage::Reasoning => "🤔",
+            AgentStage::ResponseGeneration => "🗣️",
+            AgentStage::ToolCallGeneration => match animation_phase % 2 {
+                0 => "🧨",
+                _ => "💥",
+            },
+            AgentStage::ToolExecution => match animation_phase % 2 {
+                0 => "🎆",
+                _ => "✨",
+            },
+        }
     }
 }
 

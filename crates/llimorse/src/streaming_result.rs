@@ -1,5 +1,6 @@
 //! Helper object to manage streaming result
 
+use super::agent::AgentStage;
 use super::client::ClientState;
 use super::line_format::{AssistantMessage, CustomCall, FunctionCall, ToolCall, ToolCallParams};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -215,6 +216,9 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
                 Err(err) => Some(Err(err.context("constructing finalized message"))),
             };
 
+            self.client_state
+                .operation_stage
+                .store(AgentStage::Idle, Ordering::Relaxed);
             return Poll::Ready(result);
         }
 
@@ -225,9 +229,15 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
         let line = match line {
             Some(Ok(line)) => line,
             Some(Err(err)) => {
+                self.client_state
+                    .operation_stage
+                    .store(AgentStage::Idle, Ordering::Relaxed);
                 return Poll::Ready(Some(Err(err.context("reading completion stream"))));
             }
             None => {
+                self.client_state
+                    .operation_stage
+                    .store(AgentStage::Idle, Ordering::Relaxed);
                 return Poll::Ready(Some(Err(anyhow!(
                     "completion stream ended before being done"
                 ))));
@@ -247,11 +257,17 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
                 Ok(parsed) => parsed,
                 Err(err) => {
                     let err: anyhow::Error = err.into();
+                    self.client_state
+                        .operation_stage
+                        .store(AgentStage::Idle, Ordering::Relaxed);
                     return Poll::Ready(Some(Err(err.context("completion stream invalid"))));
                 }
             };
 
             if let Err(err) = self.apply_chunk(parsed) {
+                self.client_state
+                    .operation_stage
+                    .store(AgentStage::Idle, Ordering::Relaxed);
                 return Poll::Ready(Some(Err(err)));
             }
         }
@@ -296,12 +312,24 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     fn choice_received(&mut self, choice: StreamChoice) -> Result<()> {
         self.constructing.push(&choice.delta)?;
 
+        if let Some(reasoning) = choice.delta.reasoning_content {
+            self.client_state
+                .operation_stage
+                .store(AgentStage::Reasoning, Ordering::Relaxed);
+            self.chunks.push_back(StreamingChunk::Reasoning(reasoning));
+        }
+
         if let Some(text) = choice.delta.content {
+            self.client_state
+                .operation_stage
+                .store(AgentStage::ResponseGeneration, Ordering::Relaxed);
             self.chunks.push_back(StreamingChunk::Content(text));
         }
 
-        if let Some(reasoning) = choice.delta.reasoning_content {
-            self.chunks.push_back(StreamingChunk::Reasoning(reasoning));
+        if choice.delta.tool_calls.is_some() {
+            self.client_state
+                .operation_stage
+                .store(AgentStage::ToolCallGeneration, Ordering::Relaxed);
         }
 
         Ok(())

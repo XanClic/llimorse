@@ -1,12 +1,15 @@
 //! Client for llama-server’s (llama.cpp) OpenAI-compatible chat completions API, using native
 //! template tool-calling (--jinja) and SSE streaming.
 
+use super::agent::AgentStage;
 use super::line_format::{
     ChatCompletion, ChatMessage, Models, StreamOptions, ToolChoice, ToolDefinition,
 };
 use super::streaming_result::StreamingResult;
 use anyhow::{Result, anyhow, bail};
+use atomic::Atomic;
 use futures::Stream;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time;
@@ -26,7 +29,6 @@ pub struct Client {
 }
 
 /// The current general state of a llama-server client (or, technically, slot)
-#[derive(Debug)]
 pub struct ClientState {
     /// Model in use
     pub model_name: String,
@@ -36,6 +38,9 @@ pub struct ClientState {
 
     /// Token usage (how much of the context is used)
     pub token_usage: TokenUsage,
+
+    /// What stage we are currently in, i.e. what the agent is doing
+    pub operation_stage: Atomic<AgentStage>,
 }
 
 /// Token counts from a completed chat request
@@ -124,6 +129,7 @@ impl Client {
                 model_name: model.id.clone(),
                 context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
                 token_usage: Default::default(),
+                operation_stage: Default::default(),
             }),
         })
     }
@@ -225,5 +231,17 @@ impl TokenUsage {
         self.prompt_tokens.load(Ordering::Relaxed)
             + self.completion_tokens.load(Ordering::Relaxed)
             + self.streamed_tokens.load(Ordering::Relaxed)
+    }
+}
+
+impl Debug for ClientState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let operation_stage = self.operation_stage.load(Ordering::Relaxed);
+        f.debug_struct("ClientState")
+            .field("model_name", &self.model_name)
+            .field("context_size", &self.context_size)
+            .field("token_usage", &self.token_usage)
+            .field("operation_stage", &operation_stage)
+            .finish()
     }
 }

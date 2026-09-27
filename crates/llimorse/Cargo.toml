@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+atomic.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
 bytes.workspace = true
 futures.workspace = true
 helpers.workspace = true

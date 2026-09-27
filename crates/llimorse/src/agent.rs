@@ -7,6 +7,7 @@ use super::line_format::{
 };
 use super::streaming_result::{StreamingChunk, StreamingResult};
 use anyhow::{Result, anyhow, bail};
+use bytemuck::NoUninit;
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
 use pin_project::pin_project;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::{fmt, mem};
 
@@ -61,6 +63,30 @@ pub trait ChatListener: fmt::Debug + Send {
             self.log_message(message)
         }
     }
+}
+
+/// The current operational stage of the agent
+#[derive(Clone, Copy, Debug, Default, Eq, NoUninit, PartialEq)]
+#[repr(u8)]
+pub enum AgentStage {
+    /// Waiting for a prompt
+    #[default]
+    Idle,
+
+    /// Processing a prompt or a tool call result
+    Prefill,
+
+    /// Currently producing reasoning content
+    Reasoning,
+
+    /// Currently producing the actual response output
+    ResponseGeneration,
+
+    /// Currently writing out tool call parameters
+    ToolCallGeneration,
+
+    /// Awaiting tool execution
+    ToolExecution,
 }
 
 impl ChatListener for () {
@@ -249,6 +275,11 @@ impl Agent {
                 .await?
         };
 
+        self.client
+            .state()
+            .operation_stage
+            .store(AgentStage::Prefill, Ordering::Relaxed);
+
         Ok(AgentRunning {
             streaming,
             agent: self,
@@ -268,6 +299,11 @@ impl Agent {
         mut tool_guard: F1,
         mut tool_result_guard: F2,
     ) -> bool {
+        self.client
+            .state()
+            .operation_stage
+            .store(AgentStage::ToolExecution, Ordering::Relaxed);
+
         let mut results = Vec::<ChatMessage>::with_capacity(self.pending_calls.len());
         let mut futs = FuturesUnordered::new();
         for call in mem::take(&mut self.pending_calls) {
@@ -286,6 +322,11 @@ impl Agent {
             }
         }
         drop(futs);
+
+        self.client
+            .state()
+            .operation_stage
+            .store(AgentStage::Idle, Ordering::Relaxed);
 
         if results.is_empty() {
             false
