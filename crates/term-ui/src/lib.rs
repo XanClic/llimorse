@@ -8,6 +8,7 @@ mod wrap;
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
+use helpers::TruncatedDisplay;
 use llimorse::Agent;
 use llimorse::agent::AgentStage;
 use llimorse::client::{ClientInfo, ClientState};
@@ -67,10 +68,10 @@ pub struct TermUi {
 
 /// Data for the agents currently running
 struct UiAgents {
-    /// State of the agents
+    /// State of the main agent and subagents
     state: Vec<AgentState>,
 
-    /// Which agent is being viewed
+    /// Which agent is being viewed (0 = main agent)
     active_agent: usize,
 }
 
@@ -85,11 +86,23 @@ struct AgentState {
     /// The chat history as shared with the agent
     history: Arc<Mutex<ChatHistory>>,
 
+    /// If a subagent: Additional information about it
+    subagent_state: Option<SubagentState>,
+
     /// First line of the chat history to show (`usize::MAX` to follow the tail)
     scroll: Saturating<usize>,
 
     /// How many lines (elements of `chat_history`) are visible on screen right now
     lines_on_screen: usize,
+}
+
+/// Additional information about subagents
+struct SubagentState {
+    /// The ID by which the subagent is identified in UI notifications
+    id: usize,
+
+    /// The task given to this agent
+    task: String,
 }
 
 impl TermUi {
@@ -173,16 +186,21 @@ impl TermUi {
         if event.kind == ct::KeyEventKind::Press {
             match event.code {
                 ct::KeyCode::Enter if event.modifiers.is_empty() => {
-                    if !self.input_area.is_empty() {
-                        let message = self.input_area.lines().join("\n");
-                        self.input_area.clear();
-                        return Ok(Some(ui::Event::Input(message)));
-                    } else if !self.queued_prompts.is_empty() {
-                        return Ok(Some(ui::Event::ForceSubmitQueued));
+                    if self.agents.is_main() {
+                        if !self.input_area.is_empty() {
+                            let message = self.input_area.lines().join("\n");
+                            self.input_area.clear();
+                            return Ok(Some(ui::Event::Input(message)));
+                        } else if !self.queued_prompts.is_empty() {
+                            return Ok(Some(ui::Event::ForceSubmitQueued));
+                        } else {
+                            // Ignore Enter without modifier keys that does not mean a submit
+                            // (i.e., when the field is empty, do not allow empty to create a
+                            // newline, instead just ignore it)
+                            return Ok(None);
+                        }
                     } else {
-                        // Ignore Enter without modifier keys that does not mean a submit (i.e.,
-                        // when the field is empty, do not allow empty to create a newline, instead
-                        // just ignore it)
+                        // Do not do anything unless we’re in the main agent view
                         return Ok(None);
                     }
                 }
@@ -190,11 +208,19 @@ impl TermUi {
                 ct::KeyCode::Esc => return Ok(Some(ui::Event::Exit)),
 
                 ct::KeyCode::PageUp => {
-                    self.scroll_up(self.agents.active().lines_on_screen.div_ceil(2));
+                    if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
+                        self.agents.switch_prev();
+                    } else {
+                        self.scroll_up(self.agents.active().lines_on_screen.div_ceil(2));
+                    }
                     return Ok(None);
                 }
                 ct::KeyCode::PageDown => {
-                    self.scroll_down(self.agents.active().lines_on_screen.div_ceil(2));
+                    if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
+                        self.agents.switch_next();
+                    } else {
+                        self.scroll_down(self.agents.active().lines_on_screen.div_ceil(2));
+                    }
                     return Ok(None);
                 }
 
@@ -202,7 +228,9 @@ impl TermUi {
             }
         }
 
-        self.input_area.input(event);
+        if self.agents.is_main() {
+            self.input_area.input(event);
+        }
         Ok(None)
     }
 
@@ -220,9 +248,14 @@ impl TermUi {
 
     /// Handle clipboard pasting.
     fn handle_paste_event(&mut self, text: String) -> Result<Option<ui::Event>> {
-        // Normalize line endings: `ratatui_textarea::TextArea::insert_str()` does not handle \r.
-        let text = text.replace("\r\n", "\n").replace("\r", "\n");
-        self.input_area.insert_str(&text);
+        // Ignore pasting in subagent views
+        if self.agents.is_main() {
+            // Normalize line endings: `ratatui_textarea::TextArea::insert_str()` does not handle
+            // \r.
+            let text = text.replace("\r\n", "\n").replace("\r", "\n");
+            self.input_area.insert_str(&text);
+        }
+
         Ok(None)
     }
 
@@ -230,36 +263,60 @@ impl TermUi {
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Input height field: Number of lines, maximum 5. Note that `.lines()` is always
-        // guaranteed to at least return one (empty) line, and `line_ranges` likewise always
-        // yields at least one row per line.
-        // The `TextArea` does not expose its on-screen row count, so count rows with the same
-        // wrapping algorithm the widget renders with (vendored in `wrap`).
-        const MAX_HEIGHT: usize = 5;
-        let input_inner_width = area.width.saturating_sub(2) as usize; // account for the border
-        let input_outer_height = self
-            .input_area
-            .lines()
-            .iter()
-            .take(MAX_HEIGHT)
-            .map(|line| {
-                wrap::wrapped_line_count(line, self.input_area.wrap_mode(), input_inner_width)
-            })
-            .sum::<usize>()
-            .min(MAX_HEIGHT) as u16
-            + 2; // account for the border
+        let input_outer_height = if self.agents.is_main() {
+            // Input height field: Number of lines, maximum 5. Note that `.lines()` is always
+            // guaranteed to at least return one (empty) line, and `line_ranges` likewise always
+            // yields at least one row per line.  The `TextArea` does not expose its on-screen row
+            // count, so count rows with the same wrapping algorithm the widget renders with
+            // (vendored in `wrap`).
+            const MAX_HEIGHT: usize = 5;
+            let input_inner_width = area.width.saturating_sub(2) as usize; // account for the border
+            let input_inner_height = self
+                .input_area
+                .lines()
+                .iter()
+                .take(MAX_HEIGHT)
+                .map(|line| {
+                    wrap::wrapped_line_count(line, self.input_area.wrap_mode(), input_inner_width)
+                })
+                .sum::<usize>()
+                .min(MAX_HEIGHT) as u16;
+            Some(input_inner_height + 2) // account for the border
+        } else {
+            None
+        };
 
         let mut layout = Vec::with_capacity(self.queued_prompts.len() + 2);
         layout.push(Constraint::Percentage(100));
         for _ in 0..self.queued_prompts.len() {
             layout.push(Constraint::Min(1));
         }
-        layout.push(Constraint::Min(input_outer_height));
+        if let Some(input_outer_height) = input_outer_height {
+            layout.push(Constraint::Min(input_outer_height));
+        }
 
         let layout = Layout::vertical(layout).split(area);
 
         let history_cell = layout[0];
-        let input_cell = layout[self.queued_prompts.len() + 1];
+        let input_cell = input_outer_height.map(|_| layout[self.queued_prompts.len() + 1]);
+
+        let subagent_count = self.agents.subagent_count();
+        let title_bottom = if let Some(subagent_i) = self.agents.subagent_index() {
+            let subagent_no = subagent_i + 1;
+            let title = if let Some(subagent_task) = self.agents.subagent_task() {
+                format!(
+                    " Subagent {subagent_no}/{subagent_count}: {} [Shift+PgDn/PgUp] ",
+                    subagent_task.truncated_display(40),
+                )
+            } else {
+                format!(" Subagent {subagent_no}/{subagent_count} [Shift+PgDn/PgUp] ")
+            };
+            Some(title)
+        } else if subagent_count > 0 {
+            Some(format!(" {subagent_count} subagents [Shift+PgDn/PgUp] "))
+        } else {
+            None
+        };
 
         let agent = self.agents.active_mut();
         let chat_history = agent.history.lock().unwrap();
@@ -309,11 +366,13 @@ impl TermUi {
             lines: history_lines,
         };
 
-        let paragraph = Paragraph::new(paragraph_content).block(
-            Block::bordered()
-                .title(format!(" {} ", agent.stats(self.creation)))
-                .title_style(Style::new().bold()),
-        );
+        let mut chat_block = Block::bordered()
+            .title_style(Style::new().bold())
+            .title(format!(" {} ", agent.stats(self.creation)));
+        if let Some(title_bottom) = title_bottom {
+            chat_block = chat_block.title_bottom(Line::from(title_bottom).right_aligned());
+        }
+        let paragraph = Paragraph::new(paragraph_content).block(chat_block);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         let history_len = chat_history.lines().len();
@@ -341,7 +400,9 @@ impl TermUi {
             };
             frame.render_widget(line, layout[i + 1]);
         }
-        frame.render_widget(&self.input_area, input_cell);
+        if let Some(input_cell) = input_cell {
+            frame.render_widget(&self.input_area, input_cell);
+        }
 
         // Render the permission popup last, so that it occludes the main layout.
         if let Some((prompt, _)) = self.pending_permissions.front() {
@@ -415,6 +476,18 @@ impl ui::UiState for TermUi {
             ui::Notification::RequestPermission { prompt, approval } => {
                 self.pending_permissions.push_back((prompt, approval));
             }
+            ui::Notification::SubagentCreated {
+                subagent_id,
+                prompt,
+                client_state,
+                chat_history,
+            } => {
+                self.agents
+                    .add_subagent(subagent_id, prompt, client_state, chat_history);
+            }
+            ui::Notification::SubagentDropped { subagent_id } => {
+                self.agents.remove_subagent(subagent_id);
+            }
         }
 
         self.draw()
@@ -485,7 +558,7 @@ fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
 }
 
 impl UiAgents {
-    /// Create a new collection of agents, with a single agent
+    /// Create a new collection of agents, with a single main agent
     fn new(
         main_client_state: Arc<RwLock<ClientState>>,
         main_client_info: ClientInfo,
@@ -496,11 +569,53 @@ impl UiAgents {
                 client_state: main_client_state,
                 client_info: main_client_info,
                 history: main_history,
+                subagent_state: None,
                 scroll: Saturating(usize::MAX),
                 lines_on_screen: 0,
             }],
             active_agent: 0,
         }
+    }
+
+    /// Add a new subagent at the end of our list
+    fn add_subagent(
+        &mut self,
+        subagent_id: usize,
+        prompt: String,
+        client_state: Arc<RwLock<ClientState>>,
+        history: Arc<Mutex<ChatHistory>>,
+    ) {
+        self.state.push(AgentState {
+            client_state,
+            history,
+            subagent_state: Some(SubagentState {
+                id: subagent_id,
+                task: prompt,
+            }),
+            scroll: Saturating(usize::MAX),
+            lines_on_screen: 0,
+        });
+    }
+
+    /// Remove a subagent by its ID
+    ///
+    /// If the subagent is currently active, change the active view to the main agent.
+    fn remove_subagent(&mut self, subagent_id: usize) {
+        let Some(index) = self.state.iter().position(|agent| {
+            agent
+                .subagent_state
+                .as_ref()
+                .is_some_and(|state| state.id == subagent_id)
+        }) else {
+            return;
+        };
+
+        if self.active_agent == index {
+            self.active_agent = 0;
+        } else if self.active_agent > index {
+            self.active_agent -= 1;
+        }
+        self.state.remove(index);
     }
 
     /// Return the currently active view’s agent
@@ -517,6 +632,50 @@ impl UiAgents {
             state
         } else {
             self.state.first_mut().expect("No agents left")
+        }
+    }
+
+    /// Return whether the currently active view is the main agent’s
+    fn is_main(&self) -> bool {
+        self.active_agent == 0
+    }
+
+    /// Return the subagent index, if viewing a subagent
+    fn subagent_index(&self) -> Option<usize> {
+        self.active_agent.checked_sub(1)
+    }
+
+    /// Return the number of subagents
+    fn subagent_count(&self) -> usize {
+        self.state.len().checked_sub(1).expect("No agents left")
+    }
+
+    /// If the currently active view is a subagent, return its task prompt (if known)
+    fn subagent_task(&self) -> Option<&str> {
+        self.active()
+            .subagent_state
+            .as_ref()
+            .map(|state| -> &str { &state.task })
+    }
+
+    /// Switch to the previous agent (wrapping)
+    fn switch_prev(&mut self) {
+        self.active_agent = self
+            .active_agent
+            .checked_sub(1)
+            .or_else(|| self.state.len().checked_sub(1))
+            .expect("No agents left");
+    }
+
+    /// Switch to the next agent (wrapping)
+    fn switch_next(&mut self) {
+        if self.state.is_empty() {
+            panic!("No agents left");
+        }
+
+        self.active_agent = self.active_agent.checked_add(1).unwrap_or(0);
+        if self.active_agent >= self.state.len() {
+            self.active_agent = 0;
         }
     }
 }

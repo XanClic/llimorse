@@ -9,6 +9,7 @@ chrono.workspace = true
 futures.workspace = true
 llimorse.workspace = true
 llimorse-tools.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }

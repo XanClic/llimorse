@@ -1,5 +1,9 @@
 //! UI connector for llimorse-chat UIs
 
+use crate::ChatHistory;
+use llimorse::client::ClientState;
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// UI state for interacting with the llimorse-chat application
@@ -50,6 +54,27 @@ pub enum Notification {
 
         /// The user's decision, to be sent back across this channel
         approval: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+    },
+
+    /// A new subagent has been created
+    SubagentCreated {
+        /// Unique ID by which the subagent can be identified
+        subagent_id: usize,
+
+        /// Prompt for the subagent
+        prompt: String,
+
+        /// The state of the client to which the subagent is connected
+        client_state: Arc<RwLock<ClientState>>,
+
+        /// Subagent’s chat history
+        chat_history: Arc<Mutex<ChatHistory>>,
+    },
+
+    /// A subagent is done and has been dropped
+    SubagentDropped {
+        /// The subagent’s ID
+        subagent_id: usize,
     },
 }
 
