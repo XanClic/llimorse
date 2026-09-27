@@ -23,10 +23,12 @@
 #   lemonade.sh --subagent-system <host file> # like --system, but for
 #                                     # lemon's subagent prompt: repeated
 #                                     # files are concatenated in the order
-#                                     # given, and without it lemon's
-#                                     # built-in subagent prompt is used.
-#                                     # There is no working-directory
-#                                     # fallback
+#                                     # given; with no --subagent-system,
+#                                     # LEMON.SUBAGENT.md in the working
+#                                     # directory is pushed in
+#                                     # automatically, and with no such
+#                                     # file lemon's built-in subagent
+#                                     # prompt is used
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
@@ -140,8 +142,11 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 #
 # --subagent-system: lemon's flag of the same name for the subagent prompt;
 # intercepted and resolved exactly like --system (mount at
-# /subagent-system-prompt.md). No working-directory fallback: with no
-# --subagent-system, lemon's built-in subagent prompt is used.
+# /subagent-system-prompt.md). Like --system there is a working-directory
+# fallback: with no --subagent-system, LEMON.SUBAGENT.md in the working
+# directory (where lemonade.sh was invoked, any subdirectory) is pushed in
+# if present; otherwise lemon's built-in subagent prompt is used. An
+# explicit --subagent-system always wins.
 #
 # --force-fresh: discard the worktree's state — the divergence gate below
 # would refuse to start while it holds un-fetched work — or simply start
@@ -283,10 +288,13 @@ fi
 
 # Subagent system prompt file(s): lemon's --subagent-system takes a path
 # that must exist inside the container, just like --system, so it gets the
-# same host-to-container resolution. Unlike --system there is no
-# working-directory fallback: with no --subagent-system, lemon's built-in
-# subagent prompt is used. Mounted at /subagent-system-prompt.md further
-# down.
+# same host-to-container resolution. Like --system there is a
+# working-directory fallback: with no --subagent-system, LEMON.SUBAGENT.md
+# in the working directory (where lemonade.sh was invoked, any
+# subdirectory, deliberately not the top-level) is pushed in if present,
+# so the common case needs no flag; otherwise lemon's built-in subagent
+# prompt is used. An explicit --subagent-system always wins. Mounted at
+# /subagent-system-prompt.md further down.
 SUBAGENT_SYSFILE=""
 if [ ${#SUBAGENT_SYSFILES[@]} -gt 0 ]; then
     for f in "${SUBAGENT_SYSFILES[@]}"; do
@@ -310,6 +318,12 @@ if [ ${#SUBAGENT_SYSFILES[@]} -gt 0 ]; then
         done
     fi
     set -- "$@" --subagent-system /subagent-system-prompt.md
+else
+    if [ -f LEMON.SUBAGENT.md ]; then
+        SUBAGENT_SYSFILE=$(realpath LEMON.SUBAGENT.md)
+        note "Using LEMON.SUBAGENT.md in the working directory as the subagent system prompt"
+        set -- "$@" --subagent-system /subagent-system-prompt.md
+    fi
 fi
 
 # Divergence check: compare this checkout with the worktree and set the

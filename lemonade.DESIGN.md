@@ -22,8 +22,12 @@ subdirectory; the worktree is keyed on the top-level path):
     ./lemonade.sh --subagent-system <host file> # same, for the subagent
                                                 # prompt (repeatable, same
                                                 # concatenation); without it
-                                                # lemon's built-in subagent
-                                                # prompt is used
+                                                # LEMON.SUBAGENT.md in the
+                                                # working directory is
+                                                # pushed in automatically,
+                                                # and without that lemon's
+                                                # built-in subagent prompt
+                                                # is used
     ./lemonade.sh --resume /sessions/<file> # continue a previous session
     ./lemonade.sh --force-fresh       # wipe the worktree (session logs
                                        # kept) and re-clone the checkout
@@ -324,10 +328,12 @@ the concatenated prompt the environment precedes the user's file.
 Lemon's `--subagent-system` — the system prompt for the `subagent` tool —
 is intercepted and resolved the same way: repeatable host paths,
 concatenated in order into a temp file when several, mounted read-only at
-`/subagent-system-prompt.md`. Unlike `--system` there is no
-working-directory detection and no built-in file: with no
-`--subagent-system`, lemon's built-in subagent prompt is used, and giving
-the flag replaces it wholesale.
+`/subagent-system-prompt.md`. Like `--system` there is a working-directory
+fallback: with no `--subagent-system`, `LEMON.SUBAGENT.md` in the working
+directory — where lemonade was invoked, any subdirectory, deliberately not
+the top-level — is pushed in automatically if present; with no such file,
+lemon's built-in subagent prompt is used. An explicit `--subagent-system`
+always wins, and giving the flag replaces the built-in prompt wholesale.
 
 ## The lemon binary
 
