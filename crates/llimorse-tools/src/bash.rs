@@ -7,7 +7,7 @@ use llimorse::{Agent, CallableTool};
 use std::fmt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::process::Command;
+use tokio::process::Command;
 
 llimorse::tool! {
     'name: "bash";
@@ -36,6 +36,9 @@ llimorse::tool! {
     /// Execute commands through a shell. The shell is non-interactive: there is no terminal and no
     /// stdin, so anything that would prompt (passwords, pagers, ...) fails immediately instead of
     /// waiting.
+    ///
+    /// The command runs asynchronously: awaiting `execute` does not block the runtime, and
+    /// dropping the future (e.g. when the tool call is interrupted) kills the child.
     #[derive(Debug)]
     'state: pub struct Bash<G: ToolGate> {
         /// Gate for receiving permissions to execute bash commands
@@ -78,12 +81,14 @@ impl fmt::Display for BashResult {
 /// directly, bypassing stdin, and a blocked read on it would stop the whole command with
 /// `SIGTTIN`. With no terminal to prompt on, they fail fast instead.  The remaining knobs cover
 /// prompt paths that don't use a tty at all.
+///
+/// `kill_on_drop` is enabled so that dropping the future awaiting the command's output kills the
+/// child, letting an interrupted tool call abort a still-running command.
 fn shell_command(command_line: &str) -> Command {
     let mut cmd = Command::new("bash");
     cmd.args(["-c", command_line]);
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         // `pre_exec` runs in the child between fork and exec, where only async-signal-safe calls
         // are allowed; `setsid` is one of them.
         unsafe {
@@ -99,7 +104,11 @@ fn shell_command(command_line: &str) -> Command {
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     // ssh: never invoke an askpass program
     cmd.env("SSH_ASKPASS_REQUIRE", "never");
-    // stdin is already nulled by `Command::output`
+    // No terminal and no stdin: anything that would prompt fails immediately instead of waiting.
+    // (`tokio::process::Command::output`, unlike its std counterpart, does not null stdin.)
+    cmd.stdin(std::process::Stdio::null());
+    // Dropping the future awaiting the output kills the child
+    cmd.kill_on_drop(true);
     cmd
 }
 
@@ -112,6 +121,7 @@ impl<G: ToolGate> CallableTool for Bash<G> {
 
         let output = shell_command(&params.command_line)
             .output()
+            .await
             .map_err(|err| anyhow!("Failed to execute bash: {err}"))?;
 
         #[cfg(unix)]
