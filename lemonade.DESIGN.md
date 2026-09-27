@@ -19,6 +19,11 @@ subdirectory; the worktree is keyed on the top-level path):
     ./lemonade.sh <extra args>    # forwarded after --zesty
     ./lemonade.sh --system <host file> # push a system prompt in
                                        # (repeatable: files concatenated in order)
+    ./lemonade.sh --subagent-system <host file> # same, for the subagent
+                                                # prompt (repeatable, same
+                                                # concatenation); without it
+                                                # lemon's built-in subagent
+                                                # prompt is used
     ./lemonade.sh --resume /sessions/<file> # continue a previous session
     ./lemonade.sh --force-fresh       # wipe the worktree (session logs
                                        # kept) and re-clone the checkout
@@ -315,6 +320,14 @@ are not), that a full toolchain is preinstalled, and that it is free to
 do whatever it wants — including installing more packages with dnf or
 pip, whose installs die with the container. It is passed first, so in
 the concatenated prompt the environment precedes the user's file.
+
+Lemon's `--subagent-system` — the system prompt for the `subagent` tool —
+is intercepted and resolved the same way: repeatable host paths,
+concatenated in order into a temp file when several, mounted read-only at
+`/subagent-system-prompt.md`. Unlike `--system` there is no
+working-directory detection and no built-in file: with no
+`--subagent-system`, lemon's built-in subagent prompt is used, and giving
+the flag replaces it wholesale.
 
 ## The lemon binary
 

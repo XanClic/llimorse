@@ -20,6 +20,13 @@
 #                                     # --system file of its own, noting the
 #                                     # agent is free to do whatever it
 #                                     # wants, including installing packages
+#   lemonade.sh --subagent-system <host file> # like --system, but for
+#                                     # lemon's subagent prompt: repeated
+#                                     # files are concatenated in the order
+#                                     # given, and without it lemon's
+#                                     # built-in subagent prompt is used.
+#                                     # There is no working-directory
+#                                     # fallback
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
@@ -131,6 +138,11 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # directory (where lemonade.sh was invoked, any subdirectory) is detected later
 # and pushed in; an explicit --system always wins.
 #
+# --subagent-system: lemon's flag of the same name for the subagent prompt;
+# intercepted and resolved exactly like --system (mount at
+# /subagent-system-prompt.md). No working-directory fallback: with no
+# --subagent-system, lemon's built-in subagent prompt is used.
+#
 # --force-fresh: discard the worktree's state — the divergence gate below
 # would refuse to start while it holds un-fetched work — or simply start
 # from a clean slate. Only the worktree directory is wiped; the session
@@ -142,6 +154,8 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # the post-session reminder still reports it.
 SYSFILES=()
 SYSFILE_TEMP=""
+SUBAGENT_SYSFILES=()
+SUBAGENT_SYSFILE_TEMP=""
 FORCE_FRESH=""
 IGNORE_DIVERGENCE=""
 NEW_ARGS=()
@@ -153,6 +167,13 @@ while [ $# -gt 0 ]; do
             ;;
         --system=*)
             SYSFILES+=("${1#--system=}"); shift
+            ;;
+        --subagent-system)
+            [ $# -ge 2 ] || { err "--subagent-system needs a value"; exit 1; }
+            SUBAGENT_SYSFILES+=("$2"); shift 2
+            ;;
+        --subagent-system=*)
+            SUBAGENT_SYSFILES+=("${1#--subagent-system=}"); shift
             ;;
         --force-fresh)
             FORCE_FRESH=1
@@ -258,6 +279,37 @@ else
             break
         fi
     done
+fi
+
+# Subagent system prompt file(s): lemon's --subagent-system takes a path
+# that must exist inside the container, just like --system, so it gets the
+# same host-to-container resolution. Unlike --system there is no
+# working-directory fallback: with no --subagent-system, lemon's built-in
+# subagent prompt is used. Mounted at /subagent-system-prompt.md further
+# down.
+SUBAGENT_SYSFILE=""
+if [ ${#SUBAGENT_SYSFILES[@]} -gt 0 ]; then
+    for f in "${SUBAGENT_SYSFILES[@]}"; do
+        [ -f "$f" ] || { err "Subagent system prompt file not found: $f"; exit 1; }
+    done
+    if [ ${#SUBAGENT_SYSFILES[@]} -eq 1 ]; then
+        SUBAGENT_SYSFILE=$(realpath "${SUBAGENT_SYSFILES[0]}")
+    else
+        SUBAGENT_SYSFILE=$(mktemp "${TMPDIR:-/tmp}/lemon-subagent-system-prompt.XXXXXX")
+        SUBAGENT_SYSFILE_TEMP="$SUBAGENT_SYSFILE"
+        # The cleanup trap further down also removes these; the early trap
+        # covers the window before it is installed (a pull or build failure).
+        trap 'rm -f "$ENV_PROMPT" "$SYSFILE_TEMP" "$SUBAGENT_SYSFILE_TEMP"' EXIT
+        first=1
+        for f in "${SUBAGENT_SYSFILES[@]}"; do
+            if [ "$first" -eq 1 ]; then first=0; else printf '\n\n' >> "$SUBAGENT_SYSFILE"; fi
+            # $() strips trailing newlines and printf puts exactly one back,
+            # so the blank-line join holds even for files without a final
+            # newline.
+            printf '%s\n' "$(cat -- "$f")" >> "$SUBAGENT_SYSFILE"
+        done
+    fi
+    set -- "$@" --subagent-system /subagent-system-prompt.md
 fi
 
 # Divergence check: compare this checkout with the worktree and set the
@@ -676,6 +728,7 @@ cleanup() {
     podman network rm "$NET" >/dev/null 2>&1 || true
     rm -f "$SEARXNG_SETTINGS"
     rm -f "$SYSFILE_TEMP"
+    rm -f "$SUBAGENT_SYSFILE_TEMP"
     rm -f "$ENV_PROMPT"
 }
 trap cleanup EXIT
@@ -715,6 +768,9 @@ if [ -f "$WORKTREE/Cargo.toml" ]; then
 fi
 if [ -n "$SYSFILE" ]; then
     MOUNTS+=(-v "$SYSFILE:/system-prompt.md:ro,z")
+fi
+if [ -n "$SUBAGENT_SYSFILE" ]; then
+    MOUNTS+=(-v "$SUBAGENT_SYSFILE:/subagent-system-prompt.md:ro,z")
 fi
 
 # Session logs: lemon appends the current session to /sessions (mounted

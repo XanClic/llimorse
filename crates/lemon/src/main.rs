@@ -83,6 +83,15 @@ derive_merge! {
         #[serde(deserialize_with = "helpers::system_files::deserialize")]
         system: Vec<PathBuf>,
 
+        /// Path to a file containing the subagent system prompt. May be repeated;
+        /// the files are concatenated in the order given, separated by a blank
+        /// line. Replaces the built-in subagent system prompt; with no
+        /// `--subagent-system`, the built-in one is used. In a config file,
+        /// `subagent-system` may be a single path or a list of paths.
+        #[arg(long)]
+        #[serde(deserialize_with = "helpers::system_files::deserialize")]
+        subagent_system: Vec<PathBuf>,
+
         /// File to append log output to, because the terminal is taken by the UI
         /// [default: $TMPDIR/lemon.log]
         #[arg(long)]
@@ -112,6 +121,22 @@ fn display_model_name(name: &str) -> &str {
         Some(idx) if name[idx + 1..].chars().all(|c| c.is_ascii_alphanumeric()) => &name[..idx],
         _ => name,
     }
+}
+
+/// Read the given system-prompt files and concatenate them into a single
+/// prompt, separated by a blank line. Trailing newlines of each file are
+/// trimmed so the join is uniform, even for files without a final newline.
+fn read_system_files(files: &[PathBuf]) -> Result<String> {
+    let mut prompt = String::new();
+    for file in files {
+        let content =
+            fs::read_to_string(file).map_err(|err| anyhow!("{}: {err}", file.display()))?;
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(content.trim_end_matches(['\n', '\r']));
+    }
+    Ok(prompt)
 }
 
 #[tokio::main]
@@ -149,16 +174,17 @@ async fn main() -> Result<()> {
         // One message for all files: not every chat template handles multiple
         // system messages well, and a single one at the top of the history is
         // the safe shape.
-        let mut prompt = String::new();
-        for file in &args.system {
-            let content =
-                fs::read_to_string(file).map_err(|err| anyhow!("{}: {err}", file.display()))?;
-            if !prompt.is_empty() {
-                prompt.push_str("\n\n");
-            }
-            prompt.push_str(content.trim_end_matches(['\n', '\r']));
-        }
-        Some(prompt)
+        Some(read_system_files(&args.system)?)
+    };
+
+    // The built-in subagent system prompt, replaced by --subagent-system if
+    // given. Read here with the system prompt, so a bad path fails before
+    // anything connects.
+    let subagent_system = if args.subagent_system.is_empty() {
+        "You are a non-interactive subagent. Execute the tasks given to you and report the result in detail."
+            .to_string()
+    } else {
+        read_system_files(&args.subagent_system)?
     };
 
     // Use the CLI's `--resume` if provided, otherwise default to Fresh.
@@ -200,7 +226,7 @@ async fn main() -> Result<()> {
 
     let llama_url = args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT);
     let subagent = llimorse_tools::Subagent::new(
-        "You are a non-interactive subagent. Execute the tasks given to you and report the result in detail.",
+        &subagent_system,
         llama_url,
         &agent.client_state().model_name,
         LemonToolFactory {
