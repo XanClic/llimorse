@@ -36,6 +36,19 @@
 
 set -euo pipefail
 
+# Diagnostic prefixes: Note/Warning bold, Error bold red, so they stand out
+# from regular output and from the raw podman/git output piped through below.
+# NO_COLOR (https://no-color.org) disables the coloring.
+if [ -n "${NO_COLOR:-}" ]; then
+    note() { printf 'Note: %s\n' "$*"; }
+    warn() { printf 'Warning: %s\n' "$*" >&2; }
+    err()  { printf 'Error: %s\n' "$*" >&2; }
+else
+    note() { printf '\033[1mNote:\033[0m %s\n' "$*"; }
+    warn() { printf '\033[1mWarning:\033[0m %s\n' "$*" >&2; }
+    err()  { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; }
+fi
+
 IMAGE=lemon-dev
 
 # Must run inside the work tree of the target repo; --show-toplevel fails
@@ -65,7 +78,14 @@ OLD_WORKTREE="${TMPDIR:-/tmp}/lemon-worktrees/$KEY"
 if [ -d "$OLD_WORKTREE" ] && [ ! -e "$WORKTREE" ]; then
     mkdir -p "$WORKTREE_ROOT"
     mv "$OLD_WORKTREE" "$WORKTREE"
+    note "Moved a worktree from the old layout: $OLD_WORKTREE -> $WORKTREE"
 fi
+
+# Where the pieces live: the worktree is what the container works in, the
+# sessions dir is what --resume reads back.
+note "State for this checkout lives under $LEMON_ROOT (tmpfs by default; dies at reboot):"
+printf '      Worktree:   %s\n' "$WORKTREE"
+printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESSIONS"
 
 # Argument interception: these flags are lemonade's, not lemon's, so they
 # are consumed here and rewritten for the container; everything else is
@@ -89,7 +109,7 @@ NEW_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --system)
-            [ $# -ge 2 ] || { echo "Error: --system needs a value" >&2; exit 1; }
+            [ $# -ge 2 ] || { err "--system needs a value"; exit 1; }
             SYSFILE="$2"; shift 2
             NEW_ARGS+=(--system /system-prompt.md)
             ;;
@@ -118,7 +138,7 @@ LEMON_BIN="${LEMON_BIN:-$(command -v lemon || true)}"
 # is podman's name for the host; set LLAMA_HOST for another machine.
 LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
 
-[ -x "$LEMON_BIN" ] || { echo "lemon binary not found (set LEMON_BIN)" >&2; exit 1; }
+[ -x "$LEMON_BIN" ] || { err "lemon binary not found (set LEMON_BIN to point at it)"; exit 1; }
 
 # Canonicalize to an absolute path: podman treats a -v source that does not
 # begin with '.' or '/' as a named volume, so a bare relative LEMON_BIN
@@ -221,15 +241,14 @@ print_stale_reasons() {
 # check below. Only the worktree directory goes; the session logs under
 # $SESSIONS are kept, they are the --resume handles.
 if [ -n "$FORCE_FRESH" ]; then
-    echo "Note: --force-fresh: removing $WORKTREE and re-cloning from $TOPLEVEL."
+    note "--force-fresh: removing $WORKTREE and re-cloning from $TOPLEVEL."
     rm -rf "$WORKTREE"
 fi
 
 if [ -e "$WORKTREE" ] && [ ! -d "$WORKTREE/.git" ]; then
     # Half-dead worktree (interrupted clone or partial deletion): git
     # clone would refuse the non-empty dir on this and every later run.
-    echo "Error: $WORKTREE exists but is not a git worktree." >&2
-    echo "       remove it and retry: rm -rf '$WORKTREE'" >&2
+    err "$WORKTREE exists but is not a git worktree; remove it and retry: rm -rf '$WORKTREE'" >&2
     exit 1
 fi
 
@@ -242,6 +261,7 @@ fi
 # worktree itself has no remotes, so the review gate is untouched.
 if ! git -C "$TOPLEVEL" remote get-url lemon-worktree >/dev/null 2>&1; then
     git -C "$TOPLEVEL" remote add lemon-worktree "$WORKTREE"
+    note "This checkout now has a 'lemon-worktree' remote pointing at the worktree; 'git fetch lemon-worktree' is how work comes back out of the container"
 fi
 
 # Divergence gate. The worktree outlives the session (until reboot or
@@ -260,28 +280,22 @@ fi
 #   equal   — start as is.
 check_divergence
 if [ "$WT_AT_RISK" = 1 ]; then
-    {
-        echo "Error: the worktree has work that this checkout does not have."
-        echo "       It lives on tmpfs and dies at reboot; the only durable copy"
-        echo "       of it is a fetch into this checkout."
-        print_risk_lines 7
-        echo "       fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
-        echo "       or discard:  lemonade.sh --force-fresh"
-    } >&2
+    err "The worktree has work that this checkout does not have."
+    note "It lives on tmpfs and dies at reboot; the only durable copy of it is a fetch into this checkout:"
+    print_risk_lines 7 >&2
+    note "Fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
+    note "Or discard:  lemonade.sh --force-fresh"
     exit 1
 fi
 if [ "$WT_STALE" = 1 ]; then
-    {
-        echo "Note: the worktree is behind this checkout; re-cloning it from"
-        echo "      $TOPLEVEL (every commit in it is already here, so this"
-        echo "      loses nothing):"
-        print_stale_reasons 6
-    } >&2
+    note "The worktree is behind this checkout; re-cloning it from $TOPLEVEL (every commit in it is already here, so this loses nothing):"
+    print_stale_reasons 6
     rm -rf "$WORKTREE"
 fi
 
 if [ ! -d "$WORKTREE/.git" ]; then
     mkdir -p "$WORKTREE_ROOT"
+    note "Cloning this checkout into the worktree at $WORKTREE (tmpfs; dies at reboot)"
     git clone "$TOPLEVEL" "$WORKTREE"
     # Mirror the checkout's full branch set into the worktree as local
     # branches — a plain clone leaves everything but the checked-out
@@ -323,18 +337,16 @@ if [ ! -d "$WORKTREE/.git" ]; then
         git -C "$WORKTREE" config user.email "$HOST_EMAIL"
     fi
     if [ -z "$HOST_NAME" ] && [ -z "$HOST_EMAIL" ]; then
-        echo "Warning: no user.name/user.email in the git config of" >&2
-        echo "         $TOPLEVEL; commits in the worktree will have no author." >&2
+        warn "No user.name/user.email in the git config of $TOPLEVEL; commits in the worktree will have no author."
     fi
 fi
 
 # Base image: pull for freshness; if the registry is unreachable, fall
 # back to the cached copy. (Tag must match the FROM below.)
 if ! podman pull --quiet fedora:latest; then
-    echo "Warning: could not pull fedora:latest (offline or registry unreachable);" >&2
-    echo "         falling back to the locally cached base image." >&2
+    warn "Could not pull fedora:latest (offline or registry unreachable); falling back to the locally cached base image."
     podman image inspect fedora:latest >/dev/null 2>&1 || {
-        echo "Error: no cached fedora:latest either — cannot build the image." >&2
+        err "No cached fedora:latest either — cannot build the image."
         exit 1
     }
 fi
@@ -342,10 +354,9 @@ fi
 # SearXNG sidecar image: same pull-and-fallback pattern as the base.
 SEARXNG_IMAGE=searxng/searxng
 if ! podman pull --quiet "$SEARXNG_IMAGE"; then
-    echo "Warning: could not pull $SEARXNG_IMAGE (offline or registry unreachable);" >&2
-    echo "         falling back to the locally cached image." >&2
+    warn "Could not pull $SEARXNG_IMAGE (offline or registry unreachable); falling back to the locally cached image."
     podman image inspect "$SEARXNG_IMAGE" >/dev/null 2>&1 || {
-        echo "Error: no cached $SEARXNG_IMAGE either — cannot start the sidecar." >&2
+        err "No cached $SEARXNG_IMAGE either — cannot start the sidecar."
         exit 1
     }
 fi
@@ -354,6 +365,7 @@ fi
 # The Containerfile is embedded below and passed on stdin (-f -); with no
 # context argument, the context is podman's internal temp dir holding this
 # file only — nothing from any repository is ever referenced.
+note "Building image '$IMAGE' from the embedded Containerfile (a cached no-op unless fedora:latest moved)"
 podman build --pull=never -t "$IMAGE" -f - <<'LEMON_CONTAINERFILE'
 # lemon-dev — development image for running lemon in a disposable container.
 # Design and rationale: lemonade.DESIGN.md.
@@ -429,22 +441,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-podman network create "$NET"
+NET_ID=$(podman network create "$NET")
+note "Created private network '$NET' (id ${NET_ID:0:12}): only lemon and the SearXNG sidecar share it; it is removed when this script exits"
 podman rm -f "$SEARXNG" >/dev/null 2>&1 || true  # stale container from a crashed run
-podman run --rm -d --name "$SEARXNG" --network "$NET" \
+SID=$(podman run --rm -d --name "$SEARXNG" --network "$NET" \
     -v "$SEARXNG_SETTINGS:/etc/searxng/settings.yml:ro,z" \
-    "$SEARXNG_IMAGE"
+    "$SEARXNG_IMAGE")
+note "SearXNG sidecar running — lemon's web_search backend (container '$SEARXNG', id ${SID:0:12}); it is killed when this script exits"
 
 MOUNTS=(-v "$WORKTREE:/work:z"
         -v "$SESSIONS:/sessions:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z")
 if [ -n "$SYSFILE" ]; then
-    [ -f "$SYSFILE" ] || { echo "Error: system prompt file not found: $SYSFILE" >&2; exit 1; }
+    [ -f "$SYSFILE" ] || { err "System prompt file not found: $SYSFILE"; exit 1; }
 else
     for cand in AGENTS.md CLAUDE.md; do
         if [ -f "$cand" ]; then
             SYSFILE="$cand"
-            echo "Note: using $SYSFILE in the working directory as the system prompt"
+            note "Using $SYSFILE in the working directory as the system prompt"
             set -- "$@" --system /system-prompt.md
             break
         fi
@@ -489,7 +503,7 @@ if [ "$hint_resume" -eq 1 ]; then
         [ -s "$SESSIONS/$f" ] && { newest="$f"; break; }
     done
     if [ -n "$newest" ]; then
-        echo "To continue this conversation: lemonade.sh --resume /sessions/$newest"
+        note "To continue this conversation: lemonade.sh --resume /sessions/$newest"
     fi
 fi
 
@@ -501,15 +515,12 @@ fi
 # refs ready, so `git merge lemon-worktree/<branch>` works immediately.
 check_divergence
 if [ "$WT_AT_RISK" = 1 ]; then
-    {
-        echo "Note: the worktree has work that this checkout does not have. It"
-        echo "     dies at reboot — fetch it now, or discard it deliberately:"
-        print_risk_lines 5
-        echo "     fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
-        echo "     or discard:  lemonade.sh --force-fresh"
-    }
+    note "The worktree has work that this checkout does not have. It dies at reboot — fetch it now, or discard it deliberately:"
+    print_risk_lines 6
+    note "Fetch it:    git fetch lemon-worktree   # then merge lemon-worktree/<branch>"
+    note "Or discard:  lemonade.sh --force-fresh"
 elif [ "$WT_STALE" = 1 ]; then
-    echo "Note: this checkout has moved past the worktree; the next run will re-clone it."
+    note "This checkout has moved past the worktree; the next run will re-clone it."
 fi
 
 exit "$status"
