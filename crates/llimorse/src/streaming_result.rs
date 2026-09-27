@@ -1,18 +1,18 @@
 //! Helper object to manage streaming result
 
 use super::agent::AgentStage;
-use super::client::ClientState;
+use super::client::{ClientState, TokenUsage};
 use super::line_format::{AssistantMessage, CustomCall, FunctionCall, ToolCall, ToolCallParams};
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::Stream;
 use futures::stream::FusedStream;
+use parking_lot::RwLock;
 use pin_project::pin_project;
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 /// Streamable result for a chat completion request
@@ -35,7 +35,15 @@ pub struct StreamingResult<S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     full_message: Option<AssistantMessage>,
 
     /// State of the client (which we change)
-    client_state: Arc<ClientState>,
+    client_state: Arc<RwLock<ClientState>>,
+
+    /// The current agent stage, mirroring `client_stage.operation_stage`
+    ///
+    /// Cached here so we only have to take the write lock on `client_stage` if the stage actually
+    /// changes.
+    ///
+    /// `None` means unknown.
+    stage: Option<AgentStage>,
 }
 
 /// In-construction message from the assistant to the user or system
@@ -158,14 +166,15 @@ struct StreamChoice {
 
 impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResult<S> {
     /// Read and parse the given input stream.
-    pub fn from_stream(stream: S, client_state: &Arc<ClientState>) -> Self {
+    pub fn from_stream(stream: S, client_state: Arc<RwLock<ClientState>>) -> Self {
         StreamingResult {
             stream: stream.into(),
             chunks: VecDeque::new(),
             done: false,
             constructing: Default::default(),
             full_message: None,
-            client_state: Arc::clone(client_state),
+            client_state,
+            stage: None,
         }
     }
 
@@ -216,9 +225,7 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
                 Err(err) => Some(Err(err.context("constructing finalized message"))),
             };
 
-            self.client_state
-                .operation_stage
-                .store(AgentStage::Idle, Ordering::Relaxed);
+            self.enter_idle();
             return Poll::Ready(result);
         }
 
@@ -229,15 +236,11 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
         let line = match line {
             Some(Ok(line)) => line,
             Some(Err(err)) => {
-                self.client_state
-                    .operation_stage
-                    .store(AgentStage::Idle, Ordering::Relaxed);
+                self.enter_idle();
                 return Poll::Ready(Some(Err(err.context("reading completion stream"))));
             }
             None => {
-                self.client_state
-                    .operation_stage
-                    .store(AgentStage::Idle, Ordering::Relaxed);
+                self.enter_idle();
                 return Poll::Ready(Some(Err(anyhow!(
                     "completion stream ended before being done"
                 ))));
@@ -257,17 +260,13 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
                 Ok(parsed) => parsed,
                 Err(err) => {
                     let err: anyhow::Error = err.into();
-                    self.client_state
-                        .operation_stage
-                        .store(AgentStage::Idle, Ordering::Relaxed);
+                    self.enter_idle();
                     return Poll::Ready(Some(Err(err.context("completion stream invalid"))));
                 }
             };
 
             if let Err(err) = self.apply_chunk(parsed) {
-                self.client_state
-                    .operation_stage
-                    .store(AgentStage::Idle, Ordering::Relaxed);
+                self.enter_idle();
                 return Poll::Ready(Some(Err(err)));
             }
         }
@@ -283,26 +282,17 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     /// - [`StreamingResult::client_state`] (if in the input)
     fn apply_chunk(&mut self, chunk: StreamChunk) -> Result<()> {
         for choice in chunk.choices {
-            self.client_state
-                .token_usage
-                .streamed_tokens
-                .fetch_add(1, Ordering::Relaxed);
+            self.client_state.write().token_usage.streamed_tokens += 1;
             self.choice_received(choice)?;
         }
 
         if let Some(u) = chunk.usage {
-            self.client_state
-                .token_usage
-                .prompt_tokens
-                .store(u.prompt_tokens as usize, Ordering::Relaxed);
-            self.client_state
-                .token_usage
-                .completion_tokens
-                .store(u.completion_tokens as usize, Ordering::Relaxed);
-            self.client_state
-                .token_usage
-                .streamed_tokens
-                .store(0, Ordering::Relaxed);
+            let mut client_state = self.client_state.write();
+            client_state.token_usage = TokenUsage {
+                prompt_tokens: u.prompt_tokens as usize,
+                completion_tokens: u.completion_tokens as usize,
+                streamed_tokens: 0,
+            };
         }
 
         Ok(())
@@ -313,23 +303,17 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
         self.constructing.push(&choice.delta)?;
 
         if let Some(reasoning) = choice.delta.reasoning_content {
-            self.client_state
-                .operation_stage
-                .store(AgentStage::Reasoning, Ordering::Relaxed);
+            self.set_stage(AgentStage::Reasoning);
             self.chunks.push_back(StreamingChunk::Reasoning(reasoning));
         }
 
         if let Some(text) = choice.delta.content {
-            self.client_state
-                .operation_stage
-                .store(AgentStage::ResponseGeneration, Ordering::Relaxed);
+            self.set_stage(AgentStage::ResponseGeneration);
             self.chunks.push_back(StreamingChunk::Content(text));
         }
 
         if choice.delta.tool_calls.is_some() {
-            self.client_state
-                .operation_stage
-                .store(AgentStage::ToolCallGeneration, Ordering::Relaxed);
+            self.set_stage(AgentStage::ToolCallGeneration);
         }
 
         Ok(())
@@ -339,6 +323,19 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> StreamingResultProjection<
     fn terminate(&mut self) {
         self.stream.as_mut().project().terminate();
         mem::take(self.chunks);
+    }
+
+    /// Set the current agent stage
+    pub fn set_stage(&mut self, stage: AgentStage) {
+        if *self.stage != Some(stage) {
+            self.client_state.write().operation_stage = stage;
+            *self.stage = Some(stage);
+        }
+    }
+
+    /// Request is done, return to idle
+    pub fn enter_idle(&mut self) {
+        self.set_stage(AgentStage::Idle);
     }
 }
 

@@ -1,6 +1,6 @@
 //! Agent harness around an LLM client.
 
-use super::client::{Client, ClientState};
+use super::client::{Client, ClientInfo, ClientState};
 use super::line_format::{
     AssistantMessage, ChatMessage, FunctionDefinition, SystemMessage, ToolCall, ToolCallParams,
     ToolChoiceMode, ToolDefinition, ToolResult, UserMessage,
@@ -10,13 +10,14 @@ use anyhow::{Result, anyhow, bail};
 use bytemuck::NoUninit;
 use futures::stream::{FusedStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
+use parking_lot::RwLock;
 use pin_project::pin_project;
 use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::{fmt, mem};
 
@@ -275,10 +276,7 @@ impl Agent {
                 .await?
         };
 
-        self.client
-            .state()
-            .operation_stage
-            .store(AgentStage::Prefill, Ordering::Relaxed);
+        self.client.state_mut().operation_stage = AgentStage::Prefill;
 
         Ok(AgentRunning {
             streaming,
@@ -299,10 +297,7 @@ impl Agent {
         mut tool_guard: F1,
         mut tool_result_guard: F2,
     ) -> bool {
-        self.client
-            .state()
-            .operation_stage
-            .store(AgentStage::ToolExecution, Ordering::Relaxed);
+        self.client.state_mut().operation_stage = AgentStage::ToolExecution;
 
         let mut results = Vec::<ChatMessage>::with_capacity(self.pending_calls.len());
         let mut futs = FuturesUnordered::new();
@@ -323,10 +318,7 @@ impl Agent {
         }
         drop(futs);
 
-        self.client
-            .state()
-            .operation_stage
-            .store(AgentStage::Idle, Ordering::Relaxed);
+        self.client.state_mut().operation_stage = AgentStage::Idle;
 
         if results.is_empty() {
             false
@@ -376,9 +368,19 @@ impl Agent {
         }
     }
 
+    /// Return a strong reference to the current client state object
+    pub fn client_state_arc(&self) -> Arc<RwLock<ClientState>> {
+        self.client.state_arc()
+    }
+
     /// Return the current client state object
-    pub fn client_state(&self) -> &Arc<ClientState> {
+    pub fn client_state(&self) -> impl Deref<Target = ClientState> {
         self.client.state()
+    }
+
+    /// Return the immutable client information
+    pub fn client_info(&self) -> &ClientInfo {
+        self.client.info()
     }
 }
 

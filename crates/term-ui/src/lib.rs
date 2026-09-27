@@ -10,9 +10,10 @@ use crossterm::event as ct;
 use futures::StreamExt;
 use llimorse::Agent;
 use llimorse::agent::AgentStage;
-use llimorse::client::ClientState;
+use llimorse::client::{ClientInfo, ClientState};
 use llimorse_chat::history::HistoryEntryType;
 use llimorse_chat::{ChatHistory, ui};
+use parking_lot::RwLock;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
@@ -24,6 +25,7 @@ use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::num::Saturating;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -43,8 +45,11 @@ pub struct TermUi {
     /// `term` stored here.)
     term: Option<DefaultTerminal>,
 
+    /// Immutable client information
+    client_info: ClientInfo,
+
     /// The current general state of the client
-    client_state: Arc<ClientState>,
+    client_state: Arc<RwLock<ClientState>>,
 
     /// Produces terminal events, asynchronously
     events: ct::EventStream,
@@ -90,7 +95,8 @@ impl TermUi {
 
         TermUi {
             term: Some(term),
-            client_state: Arc::clone(agent.client_state()),
+            client_info: agent.client_info().clone(),
+            client_state: agent.client_state_arc(),
             events: ct::EventStream::new(),
             chat_history,
             history_scroll: Saturating(usize::MAX),
@@ -287,19 +293,20 @@ impl TermUi {
             lines: history_lines,
         };
 
-        let tokens = self.client_state.token_usage.sum();
-        let stage = self.animated_stage_emoji();
-        let title = if let Some(context_size) = self.client_state.context_size {
+        let client_state = self.client_state();
+        let tokens = client_state.token_usage.sum();
+        let stage = self.animated_stage_emoji(client_state.operation_stage);
+        let title = if let Some(context_size) = self.client_info.context_size {
             format!(
                 " {} {stage} {:.1}k / {:.1}k ",
-                self.client_state.model_name,
+                self.client_info.model_name,
                 tokens as f32 * 1.0e-3,
                 context_size as f32 * 1.0e-3,
             )
         } else {
             format!(
                 " {} {stage} {:.1}k ",
-                self.client_state.model_name,
+                self.client_info.model_name,
                 tokens as f32 * 1.0e-3,
             )
         };
@@ -379,10 +386,10 @@ impl TermUi {
     /// (i.e. all phases but reasoning and response generation) should have animated emoji, so the
     /// user knows we are not stuck. The exception of course is the idle (awaiting prompt) phase,
     /// where an animation would be distracting.
-    fn animated_stage_emoji(&self) -> &'static str {
+    fn animated_stage_emoji(&self, stage: AgentStage) -> &'static str {
         let animation_phase = self.creation.elapsed().as_secs();
 
-        match self.client_state.operation_stage.load(Ordering::Relaxed) {
+        match stage {
             AgentStage::Idle => "🟢",
             AgentStage::Prefill => match animation_phase % 6 {
                 0 | 2 | 4 => "⏳",
@@ -401,6 +408,11 @@ impl TermUi {
                 _ => "✨",
             },
         }
+    }
+
+    /// Return the current client state object
+    fn client_state(&self) -> impl Deref<Target = ClientState> {
+        self.client_state.read()
     }
 }
 

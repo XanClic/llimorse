@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
     // Push the current time and date
     if manager.history.is_empty() {
         let now = Local::now();
-        let model_name = display_model_name(&agent.client_state().model_name);
+        let model_name = display_model_name(&agent.client_info().model_name);
         agent.push_system(format!(
             "The current date and time is {}, {}. Your model name is {2}, and you are running in the lemon harness. \
              Sign git commits with \"Co-Authored-by: {2} on lemon <lemon@localhost>\".",

@@ -21,11 +21,11 @@ llimorse-chat = { path = "crates/llimorse-chat" }
 llimorse-tools = { path = "crates/llimorse-tools" }
 term-ui = { path = "crates/term-ui" }
 anyhow = "1"
-atomic = "0.6"
 bytes = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+parking_lot = "0.12"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

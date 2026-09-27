@@ -7,11 +7,10 @@ use super::line_format::{
 };
 use super::streaming_result::StreamingResult;
 use anyhow::{Result, anyhow, bail};
-use atomic::Atomic;
 use futures::Stream;
-use std::fmt::{self, Debug};
+use parking_lot::RwLock;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time;
 use tracing::{debug, warn};
 
@@ -24,36 +23,44 @@ pub struct Client {
     /// Chat endpoint URL
     url: String,
 
+    /// Immutable client state (information)
+    info: ClientInfo,
+
     /// The current general state of the client
-    state: Arc<ClientState>,
+    state: Arc<RwLock<ClientState>>,
 }
 
-/// The current general state of a llama-server client (or, technically, slot)
-pub struct ClientState {
+/// Immutable information regarding a llama-server client (or, technically, slot)
+#[derive(Clone, Debug)]
+pub struct ClientInfo {
     /// Model in use
     pub model_name: String,
 
     /// Context size in tokens
     pub context_size: Option<usize>,
+}
 
+/// The current general state of a llama-server client (or, technically, slot)
+#[derive(Debug)]
+pub struct ClientState {
     /// Token usage (how much of the context is used)
     pub token_usage: TokenUsage,
 
     /// What stage we are currently in, i.e. what the agent is doing
-    pub operation_stage: Atomic<AgentStage>,
+    pub operation_stage: AgentStage,
 }
 
 /// Token counts from a completed chat request
 #[derive(Debug, Default)]
 pub struct TokenUsage {
     /// Tokens in the prompt
-    pub prompt_tokens: AtomicUsize,
+    pub prompt_tokens: usize,
 
     /// New tokens produced
-    pub completion_tokens: AtomicUsize,
+    pub completion_tokens: usize,
 
     /// Tokens being streamed
-    pub streamed_tokens: AtomicUsize,
+    pub streamed_tokens: usize,
 }
 
 impl Client {
@@ -125,12 +132,14 @@ impl Client {
         Ok(Client {
             http,
             url: format!("{base_url}/v1/chat/completions"),
-            state: Arc::new(ClientState {
+            info: ClientInfo {
                 model_name: model.id.clone(),
                 context_size: model.meta.as_ref().and_then(|m| m.n_ctx),
+            },
+            state: Arc::new(RwLock::new(ClientState {
                 token_usage: Default::default(),
                 operation_stage: Default::default(),
-            }),
+            })),
         })
     }
 
@@ -145,7 +154,7 @@ impl Client {
         tool_choice: T,
     ) -> Result<StreamingResult<impl Stream<Item = reqwest::Result<bytes::Bytes>> + use<T>>> {
         let request = ChatCompletion {
-            model: &self.state.model_name,
+            model: &self.info.model_name,
             messages,
             stream: true,
             stream_options: StreamOptions {
@@ -160,7 +169,7 @@ impl Client {
 
         Ok(StreamingResult::from_stream(
             response.bytes_stream(),
-            &self.state,
+            Arc::clone(&self.state),
         ))
     }
 
@@ -219,29 +228,30 @@ impl Client {
         Ok(response)
     }
 
+    /// Return a strong reference to the current client state object
+    pub fn state_arc(&self) -> Arc<RwLock<ClientState>> {
+        Arc::clone(&self.state)
+    }
+
     /// Return the current client state object
-    pub fn state(&self) -> &Arc<ClientState> {
-        &self.state
+    pub fn state(&self) -> impl Deref<Target = ClientState> {
+        self.state.read()
+    }
+
+    /// Return a mutable reference to the current client state object
+    pub fn state_mut(&self) -> impl DerefMut<Target = ClientState> {
+        self.state.write()
+    }
+
+    /// Return the immutable client information
+    pub fn info(&self) -> &ClientInfo {
+        &self.info
     }
 }
 
 impl TokenUsage {
     /// The full sum of all tokens in the context
     pub fn sum(&self) -> usize {
-        self.prompt_tokens.load(Ordering::Relaxed)
-            + self.completion_tokens.load(Ordering::Relaxed)
-            + self.streamed_tokens.load(Ordering::Relaxed)
-    }
-}
-
-impl Debug for ClientState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operation_stage = self.operation_stage.load(Ordering::Relaxed);
-        f.debug_struct("ClientState")
-            .field("model_name", &self.model_name)
-            .field("context_size", &self.context_size)
-            .field("token_usage", &self.token_usage)
-            .field("operation_stage", &operation_stage)
-            .finish()
+        self.prompt_tokens + self.completion_tokens + self.streamed_tokens
     }
 }

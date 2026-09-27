@@ -1467,10 +1467,10 @@ name = "llimorse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "atomic",
  "bytemuck",
  "bytes",
  "futures",
+ "parking_lot",
  "pin-project",
  "reqwest",
  "schemars",
@@ -2815,6 +2815,7 @@ dependencies = [
  "futures",
  "llimorse",
  "llimorse-chat",
+ "parking_lot",
  "ratatui",
  "ratatui-textarea",
  "textwrap",
