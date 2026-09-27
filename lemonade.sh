@@ -775,6 +775,25 @@ MOUNTS=(-v "$WORKTREE:/work:O"
         -v "$SHARE_DIR:/share:z"
         -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z"
         -v "$ENV_PROMPT:/system-prompt-env.md:ro,z")
+# Host local time: the image ships /etc/localtime pointing at UTC, so
+# without this the container reads GMT. We pass the host's zone as TZ
+# and let the image resolve it against its own /usr/share/zoneinfo,
+# which makes date, ls and git's timestamp offsets show the host's
+# zone. The naive way is to mount the host's file, but its :z relabel
+# is denied by SELinux (lsetxattr: operation not permitted), so we
+# don't. readlink covers the common case (/etc/localtime is a symlink
+# to the zone file); a copied file has no recoverable zone name, so we
+# fall back to the caller's $TZ, if any.
+TZ_ENV=()
+if [ -L /etc/localtime ]; then
+    zone=$(readlink -f /etc/localtime)
+    case "$zone" in
+        /usr/share/zoneinfo/*) TZ_ENV=(-e "TZ=${zone#/usr/share/zoneinfo/}") ;;
+    esac
+elif [ -n "${TZ:-}" ]; then
+    TZ_ENV=(-e "TZ=$TZ")
+fi
+[ -n "${TZ_ENV[*]:-}" ] || note "Could not determine the host timezone; the container stays at UTC"
 # Shared directory: mounted at /share, readable and writable from both
 # the container and the host — the channel for exchanging files between
 # them during the session. Under $LEMON_ROOT/share like the worktree and
@@ -832,6 +851,7 @@ podman run --rm -it \
     --network "$NET" \
     "${MOUNTS[@]}" \
     "${TERMINAL_ENV[@]}" \
+    "${TZ_ENV[@]}" \
     -w /work \
     "$IMAGE" \
     bash -c "$EXPORT_SESSION" export-session \
