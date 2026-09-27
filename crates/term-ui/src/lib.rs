@@ -537,7 +537,19 @@ impl ui::UiState for TermUi {
         match notification {
             ui::Notification::Exit => (), // To be handled by the parent
             ui::Notification::Update => (),
-            ui::Notification::PromptQueued(p) => self.queued_prompts.push_back(p),
+            ui::Notification::PromptQueued(p) => {
+                let sanitized = p
+                    .chars()
+                    .filter_map(|c| match c {
+                        '\n' => Some('↵'),
+                        '\t' => Some(' '),
+                        '\r' => None,
+                        c if c.is_ascii_control() => Some('�'),
+                        c => Some(c),
+                    })
+                    .collect::<String>();
+                self.queued_prompts.push_back(sanitized);
+            }
             ui::Notification::PromptSubmitted => {
                 self.queued_prompts.pop_front();
                 self.processing = true;
