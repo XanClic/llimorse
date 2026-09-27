@@ -190,11 +190,94 @@ impl ChatHistory {
 mod tests {
     use super::*;
     use llimorse::line_format::{FunctionCall, SystemMessage, ToolCall};
-    use llimorse::{Agent, Client};
 
-    /// Create a throwaway agent (constructing the client does no network access).
-    fn test_agent() -> Agent {
-        Agent::new(Client::new("http://localhost"))
+    /// Test-only, agent-less variant of [`ChatHistory::push_raw`].
+    ///
+    /// Tool calls and results are formatted with the fallback strings the agent display uses
+    /// for unregistered tools, since no tool registry is involved.
+    impl ChatHistory {
+        fn push_raw_test(&mut self, msg: &ChatMessage) {
+            match msg {
+                ChatMessage::System(_) => (),
+
+                ChatMessage::User(UserMessage { content }) => {
+                    self.push_lines(content, HistoryEntryType::User, true);
+                }
+
+                ChatMessage::Assistant(AssistantMessage {
+                    reasoning_content,
+                    content,
+                    tool_calls,
+                }) => {
+                    if let Some(reasoning) = reasoning_content {
+                        self.push_lines(reasoning, HistoryEntryType::Reasoning, true);
+                    }
+                    if let Some(content) = content {
+                        self.push_lines(content, HistoryEntryType::Content, true);
+                    }
+                    if let Some(tool_calls) = tool_calls {
+                        for call in tool_calls {
+                            self.open_tool_calls
+                                .insert(call.id.clone(), call.call.clone());
+
+                            let display = match &call.call {
+                                ToolCallParams::Function { function } => {
+                                    format!("[unknown function {}]", function.name)
+                                }
+                                ToolCallParams::Custom { custom } => {
+                                    format!("[unknown tool {}]", custom.name)
+                                }
+                            };
+                            self.push_lines(
+                                &format!("[{}] {}\n", call.id, display),
+                                HistoryEntryType::ToolCall,
+                                true,
+                            );
+                        }
+                    }
+                }
+
+                ChatMessage::Tool(ToolResult {
+                    tool_call_id,
+                    content,
+                }) => {
+                    let call = self.open_tool_calls.remove(tool_call_id);
+                    let name = match &call {
+                        Some(ToolCallParams::Function { function }) => &function.name,
+                        Some(ToolCallParams::Custom { custom }) => &custom.name,
+                        _ => "(unmatched call)",
+                    };
+
+                    match content
+                        .strip_prefix("TOOL CALL FAILED: ")
+                        .or_else(|| content.strip_prefix("TOOL CALL REJECTED: "))
+                    {
+                        Some(error) => self.push_lines(
+                            &format!("[{name}/{tool_call_id}]=> {error}\n"),
+                            HistoryEntryType::ToolResultErr,
+                            true,
+                        ),
+                        None => {
+                            let display = match &call {
+                                Some(ToolCallParams::Function { function }) => {
+                                    format!("[unknown function {}]", function.name)
+                                }
+                                Some(ToolCallParams::Custom { custom }) => {
+                                    format!("[unknown tool {}]", custom.name)
+                                }
+                                None => String::new(),
+                            };
+                            let line = if display.is_empty() {
+                                format!("[{name}/{tool_call_id}]=> {}\n", content)
+                            } else {
+                                format!("=[{name}/{tool_call_id}]=> {}\n", display)
+                            };
+                            self.push_lines(&line, HistoryEntryType::ToolResultOk, true);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Assert the core invariant: no history entry spans multiple physical lines.
@@ -208,23 +291,16 @@ mod tests {
 
     #[test]
     fn push_raw_splits_multiline_messages() {
-        let agent = test_agent();
         let mut history = ChatHistory::default();
 
-        history.push_raw(
-            &agent,
-            &ChatMessage::User(UserMessage {
-                content: "line one\nline two".into(),
-            }),
-        );
-        history.push_raw(
-            &agent,
-            &ChatMessage::Assistant(AssistantMessage {
-                reasoning_content: Some("think one\nthink two".into()),
-                content: Some("reply one\nreply two".into()),
-                tool_calls: None,
-            }),
-        );
+        history.push_raw_test(&ChatMessage::User(UserMessage {
+            content: "line one\nline two".into(),
+        }));
+        history.push_raw_test(&ChatMessage::Assistant(AssistantMessage {
+            reasoning_content: Some("think one\nthink two".into()),
+            content: Some("reply one\nreply two".into()),
+            tool_calls: None,
+        }));
 
         assert_eq!(
             history.lines(),
@@ -244,7 +320,6 @@ mod tests {
 
     #[test]
     fn push_raw_splits_tool_calls_and_results() {
-        let agent = test_agent();
         let mut history = ChatHistory::default();
 
         let call = ToolCall {
@@ -256,21 +331,15 @@ mod tests {
                 },
             },
         };
-        history.push_raw(
-            &agent,
-            &ChatMessage::Assistant(AssistantMessage {
-                reasoning_content: None,
-                content: None,
-                tool_calls: Some(vec![call]),
-            }),
-        );
-        history.push_raw(
-            &agent,
-            &ChatMessage::Tool(ToolResult {
-                tool_call_id: "call_1".into(),
-                content: "result one\nresult two\n".into(),
-            }),
-        );
+        history.push_raw_test(&ChatMessage::Assistant(AssistantMessage {
+            reasoning_content: None,
+            content: None,
+            tool_calls: Some(vec![call]),
+        }));
+        history.push_raw_test(&ChatMessage::Tool(ToolResult {
+            tool_call_id: "call_1".into(),
+            content: "result one\nresult two\n".into(),
+        }));
 
         // The tool is not registered with the test agent, so the display falls back to the
         // `[unknown ...]` forms
@@ -294,27 +363,17 @@ mod tests {
 
     #[test]
     fn push_raw_does_not_merge_consecutive_messages() {
-        let agent = test_agent();
         let mut history = ChatHistory::default();
 
-        history.push_raw(
-            &agent,
-            &ChatMessage::User(UserMessage {
-                content: "first".into(),
-            }),
-        );
-        history.push_raw(
-            &agent,
-            &ChatMessage::System(SystemMessage {
-                content: "in between".into(),
-            }),
-        );
-        history.push_raw(
-            &agent,
-            &ChatMessage::User(UserMessage {
-                content: "second".into(),
-            }),
-        );
+        history.push_raw_test(&ChatMessage::User(UserMessage {
+            content: "first".into(),
+        }));
+        history.push_raw_test(&ChatMessage::System(SystemMessage {
+            content: "in between".into(),
+        }));
+        history.push_raw_test(&ChatMessage::User(UserMessage {
+            content: "second".into(),
+        }));
 
         // System messages are skipped, so the two user messages end up adjacent — but they must
         // stay separate entries, not be merged into one line

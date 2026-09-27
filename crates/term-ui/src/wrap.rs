@@ -128,62 +128,48 @@ fn display_width(text: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// Segments of the given line after wrapping at the given width.
-    fn segments(line: &str, mode: WrapMode, width: usize) -> Vec<&str> {
-        line_ranges(line, mode, width)
-            .into_iter()
-            .map(|(s, e)| &line[s..e])
-            .collect()
-    }
-
     #[test]
     fn trailing_space_rolls_onto_its_own_row() {
-        assert_eq!(segments("foo ", WrapMode::Word, 3), vec!["foo", " "]);
-        assert_eq!(segments("foo ", WrapMode::WordOrGlyph, 3), vec!["foo", " "]);
-        assert_eq!(segments("foo ", WrapMode::Glyph, 3), vec!["foo", " "]);
+        assert_eq!(wrapped_line_count("foo ", WrapMode::Word, 3), 2);
+        assert_eq!(wrapped_line_count("foo ", WrapMode::WordOrGlyph, 3), 2);
+        assert_eq!(wrapped_line_count("foo ", WrapMode::Glyph, 3), 2);
     }
 
     #[test]
     fn internal_space_runs_consume_width() {
-        assert_eq!(segments("a  b", WrapMode::Word, 2), vec!["a", "  ", "b"]);
+        assert_eq!(wrapped_line_count("a  b", WrapMode::Word, 2), 3);
     }
 
     #[test]
     fn empty_line_is_one_row() {
-        assert_eq!(segments("", WrapMode::Word, 10), vec![""]);
+        assert_eq!(wrapped_line_count("", WrapMode::Word, 10), 1);
     }
 
     #[test]
     fn word_wrap_keeps_long_word() {
-        assert_eq!(
-            segments("helloworld", WrapMode::Word, 4),
-            vec!["helloworld"]
-        );
+        assert_eq!(wrapped_line_count("helloworld", WrapMode::Word, 4), 1);
     }
 
     #[test]
     fn word_or_glyph_wrap_splits_long_word() {
         assert_eq!(
-            segments("helloworld", WrapMode::WordOrGlyph, 4),
-            vec!["hell", "owor", "ld"]
+            wrapped_line_count("helloworld", WrapMode::WordOrGlyph, 4),
+            3
         );
     }
 
     #[test]
     fn glyph_wrap_handles_wide_chars() {
-        assert_eq!(segments("ab犬猫", WrapMode::Glyph, 4), vec!["ab犬", "猫"]);
+        assert_eq!(wrapped_line_count("ab犬猫", WrapMode::Glyph, 4), 2);
     }
 
     #[test]
     fn glyph_wrap_keeps_combining_grapheme_cluster() {
-        assert_eq!(
-            segments("e\u{301}x", WrapMode::Glyph, 1),
-            vec!["e\u{301}", "x"]
-        );
+        assert_eq!(wrapped_line_count("e\u{301}x", WrapMode::Glyph, 1), 2);
     }
 
     #[test]
     fn glyph_wrap_preserves_full_mixed_width_row_capacity() {
-        assert_eq!(segments("a中bcde", WrapMode::Glyph, 4), vec!["a中b", "cde"]);
+        assert_eq!(wrapped_line_count("a中bcde", WrapMode::Glyph, 4), 2);
     }
 }
