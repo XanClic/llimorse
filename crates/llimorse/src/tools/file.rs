@@ -17,7 +17,7 @@ crate::tool! {
         /// Filename to read
         filename: PathBuf,
 
-        /// Range of line to read (inclusive): First line and last line. Full file if not
+        /// Range of lines to read: First line and last line (inclusive). Full file if not
         /// specified.
         range: Option<(usize, usize)>,
     }
@@ -73,20 +73,23 @@ impl CallableTool for View {
             .map_err(|err| anyhow!("Failed to open {}: {err}", params.filename.display()))?;
         let reader = BufReader::new(file);
 
-        let range = params.range.unwrap_or((0, usize::MAX));
-        let skip = range.0;
+        let range = params.range.unwrap_or((1, usize::MAX));
+        let skip = range
+            .0
+            .checked_sub(1) // ranges are 1-based
+            .ok_or_else(|| anyhow!("Range {range:?}: First line is 1, not 0"))?;
+
         let take = range
             .1
-            .saturating_add(1)
             .checked_sub(range.0)
             .ok_or_else(|| {
                 anyhow!(
-                    "Range end
-                must be strictly greater than range start: {} > {}",
+                    "Range end must be greater or equal to the range start: {} >= {}",
                     range.1,
                     range.0
                 )
-            })?;
+            })?
+            .saturating_add(1); // end is inclusive, so 0 diff means read 1 line
 
         let content = reader
             .lines()
