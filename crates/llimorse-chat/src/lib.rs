@@ -98,26 +98,27 @@ impl<I: UiState> App<I> {
 
     /// Run the application until it finds it should exit.
     pub async fn run(&mut self) -> Result<()> {
-        // Draw once at start
-        self.ui
-            .notify(ui::Notification::Update)
-            .map_err(Into::into)?;
-
-        let redraw_min_time = Duration::from_millis(500);
+        // Redraw at a steady cadence, independent of how busy the notification
+        // channel is (a hot channel must not starve the idle tick, which e.g.
+        // animates the spinner). The first tick is immediate, so this also
+        // covers the initial draw.
+        let mut redraw_interval = time::interval(Duration::from_millis(500));
 
         loop {
             let event_result = futures::select! {
                 result = self.ui.get_event().fuse() => result.map(Some).map_err(Into::into),
-                notification = time::timeout(redraw_min_time, self.ui_notifications.recv()).fuse() => {
-                    if let Ok(Some(notification)) = notification {
+                _ = redraw_interval.tick().fuse() => {
+                    self.ui.notify(ui::Notification::Update).map_err(Into::into)?;
+                    Ok(None)
+                }
+                notification = self.ui_notifications.recv().fuse() => {
+                    if let Some(notification) = notification {
                         let exit = matches!(notification, ui::Notification::Exit);
                         self.ui.notify(notification).map_err(Into::into)?;
                         if exit {
                             // TODO: Fix this, it's a bit of a hack here
                             return Ok(());
                         }
-                    } else {
-                        self.ui.notify(ui::Notification::Update).map_err(Into::into)?;
                     }
                     Ok(None)
                 }

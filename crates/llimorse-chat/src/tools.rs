@@ -1,7 +1,8 @@
 //! Helpers for tools, for use with llimorse-chat
 
+use crate::ChatHistory;
 use crate::history::HistoryEntryType;
-use crate::{ChatHistory, ui};
+use crate::ui::{self, AgentId, SubagentId};
 use anyhow::Result;
 use llimorse::line_format::ToolCall;
 use llimorse::{Agent, StreamingChunk};
@@ -66,7 +67,7 @@ pub struct SubagentNotifier {
 #[derive(Debug)]
 pub struct SubagentConnector {
     /// The auto-generated subagent ID
-    id: usize,
+    id: SubagentId,
 
     /// The subagents chat history
     chat_history: Arc<Mutex<ChatHistory>>,
@@ -94,7 +95,7 @@ impl llimorse_tools::subagent::SubagentNotifier for SubagentNotifier {
 
     async fn created(&self, agent: &Agent, prompt: &str) -> Result<SubagentConnector> {
         let subagent = SubagentConnector::new(
-            self.subagent_id_counter.fetch_add(1, Ordering::Relaxed),
+            SubagentId::new(self.subagent_id_counter.fetch_add(1, Ordering::Relaxed)),
             self.notifications.clone(),
         );
 
@@ -120,12 +121,19 @@ impl SubagentConnector {
     ///
     /// `id` is the generated subagent ID, `notifications` is a channel to inform the UI of
     /// changes.
-    fn new(id: usize, notifications: mpsc::UnboundedSender<ui::Notification>) -> Self {
+    fn new(id: SubagentId, notifications: mpsc::UnboundedSender<ui::Notification>) -> Self {
         SubagentConnector {
             id,
             chat_history: Default::default(),
             notifications,
         }
+    }
+
+    /// Notify the UI that this subagent’s history has been updated
+    fn notify_update(&self) {
+        let _ = self.notifications.send(ui::Notification::UpdateAgent {
+            agent_id: AgentId::Subagent(self.id),
+        });
     }
 }
 
@@ -149,6 +157,7 @@ impl llimorse_tools::subagent::SubagentConnector for SubagentConnector {
             .lock()
             .unwrap()
             .push_lines(&string, kind, false);
+        self.notify_update();
     }
 
     fn tool_call(&self, agent: &Agent, call: &ToolCall) -> Result<()> {
@@ -157,6 +166,7 @@ impl llimorse_tools::subagent::SubagentConnector for SubagentConnector {
             HistoryEntryType::ToolCall,
             true,
         );
+        self.notify_update();
         Ok(())
     }
 
@@ -179,6 +189,7 @@ impl llimorse_tools::subagent::SubagentConnector for SubagentConnector {
             ),
         }
 
+        self.notify_update();
         Ok(())
     }
 }

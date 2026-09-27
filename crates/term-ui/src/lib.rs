@@ -13,6 +13,7 @@ use llimorse::Agent;
 use llimorse::agent::AgentStage;
 use llimorse::client::{ClientInfo, ClientState};
 use llimorse_chat::history::HistoryEntryType;
+use llimorse_chat::ui::{AgentId, SubagentId};
 use llimorse_chat::{ChatHistory, ui};
 use parking_lot::RwLock;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
@@ -106,7 +107,7 @@ struct AgentState {
 /// Additional information about subagents
 struct SubagentState {
     /// The ID by which the subagent is identified in UI notifications
-    id: usize,
+    id: SubagentId,
 
     /// The task given to this agent
     task: String,
@@ -537,6 +538,12 @@ impl ui::UiState for TermUi {
         match notification {
             ui::Notification::Exit => (), // To be handled by the parent
             ui::Notification::Update => (),
+            ui::Notification::UpdateAgent { agent_id } => {
+                // Skip the redraw if the updated agent is not the one on screen
+                if agent_id != self.agents.active_agent_id() {
+                    return Ok(());
+                }
+            }
             ui::Notification::PromptQueued(p) => {
                 let sanitized = p
                     .chars()
@@ -665,7 +672,7 @@ impl UiAgents {
     /// Add a new subagent at the end of our list
     fn add_subagent(
         &mut self,
-        subagent_id: usize,
+        subagent_id: SubagentId,
         prompt: String,
         client_state: Arc<RwLock<ClientState>>,
         history: Arc<Mutex<ChatHistory>>,
@@ -685,7 +692,7 @@ impl UiAgents {
     /// Remove a subagent by its ID
     ///
     /// If the subagent is currently active, change the active view to the main agent.
-    fn remove_subagent(&mut self, subagent_id: usize) {
+    fn remove_subagent(&mut self, subagent_id: SubagentId) {
         let Some(index) = self.state.iter().position(|agent| {
             agent
                 .subagent_state
@@ -723,6 +730,14 @@ impl UiAgents {
     /// Return whether the currently active view is the main agent’s
     fn is_main(&self) -> bool {
         self.active_agent == 0
+    }
+
+    /// Return the ID of the agent in the currently active view
+    fn active_agent_id(&self) -> AgentId {
+        self.active()
+            .subagent_state
+            .as_ref()
+            .map_or(AgentId::Main, |state| AgentId::Subagent(state.id))
     }
 
     /// Return the subagent index, if viewing a subagent

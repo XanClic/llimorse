@@ -72,6 +72,12 @@ pub enum Notification {
     /// Update the interface
     Update,
 
+    /// The given agent’s history has been updated
+    UpdateAgent {
+        /// The ID of the agent whose history was updated
+        agent_id: AgentId,
+    },
+
     /// User message queued to be submitted to the LLM
     PromptQueued(String),
 
@@ -96,7 +102,7 @@ pub enum Notification {
     /// A new subagent has been created
     SubagentCreated {
         /// Unique ID by which the subagent can be identified
-        subagent_id: usize,
+        subagent_id: SubagentId,
 
         /// Prompt for the subagent
         prompt: String,
@@ -111,7 +117,7 @@ pub enum Notification {
     /// A subagent is done and has been dropped
     SubagentDropped {
         /// The subagent’s ID
-        subagent_id: usize,
+        subagent_id: SubagentId,
     },
 }
 

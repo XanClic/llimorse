@@ -1,7 +1,7 @@
 //! Handle the agent-running part.
 
 use super::history::{ChatHistory, HistoryEntryType};
-use super::ui;
+use super::ui::{self, AgentId};
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use llimorse::StreamingChunk;
@@ -239,6 +239,8 @@ impl ChatAgent {
         history.push_lines(string, kind, kind == HistoryEntryType::User);
         drop(history);
 
-        let _ = self.ui_notifications.send(ui::Notification::Update);
+        let _ = self.ui_notifications.send(ui::Notification::UpdateAgent {
+            agent_id: AgentId::Main,
+        });
     }
 }
