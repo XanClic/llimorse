@@ -33,7 +33,9 @@ llimorse::tool! {
         stderr: String,
     }
 
-    /// Execute commands through a shell.
+    /// Execute commands through a shell. The shell is non-interactive: there is no terminal and no
+    /// stdin, so anything that would prompt (passwords, pagers, ...) fails immediately instead of
+    /// waiting.
     #[derive(Debug)]
     'state: pub struct Bash<G: ToolGate> {
         /// Gate for receiving permissions to execute bash commands
@@ -69,6 +71,38 @@ impl fmt::Display for BashResult {
     }
 }
 
+/// Build the command for executing `command_line` through a shell.
+///
+/// The shell is decidedly non-interactive. The child is placed in a new session (`setsid`), so it
+/// has no controlling terminal: programs that prompt on a tty (git, ssh, ...) open `/dev/tty`
+/// directly, bypassing stdin, and a blocked read on it would stop the whole command with
+/// `SIGTTIN`. With no terminal to prompt on, they fail fast instead.  The remaining knobs cover
+/// prompt paths that don't use a tty at all.
+fn shell_command(command_line: &str) -> Command {
+    let mut cmd = Command::new("bash");
+    cmd.args(["-c", command_line]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // `pre_exec` runs in the child between fork and exec, where only async-signal-safe calls
+        // are allowed; `setsid` is one of them.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    // git: never prompt for credentials (also gives a clearer error)
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    // ssh: never invoke an askpass program
+    cmd.env("SSH_ASKPASS_REQUIRE", "never");
+    // stdin is already nulled by `Command::output`
+    cmd
+}
+
 impl<G: ToolGate> CallableTool for Bash<G> {
     async fn execute(&self, _agent: &Agent, params: BashParams) -> Result<BashResult> {
         self.gate
@@ -76,8 +110,7 @@ impl<G: ToolGate> CallableTool for Bash<G> {
             .await
             .map_err(|e| anyhow!("Bash tool call rejected: {e}"))?;
 
-        let output = Command::new("bash")
-            .args(["-c", &params.command_line])
+        let output = shell_command(&params.command_line)
             .output()
             .map_err(|err| anyhow!("Failed to execute bash: {err}"))?;
 
