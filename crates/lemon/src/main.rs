@@ -8,6 +8,7 @@ use chrono::format::SecondsFormat;
 use chrono::{Datelike, Local};
 use clap::Parser;
 use helpers::macros::{Mergeable, derive_merge};
+use llimorse::Agent;
 use llimorse_chat::log::{Resume, SessionManager};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -20,6 +21,37 @@ const LLAMA_URL_DEFAULT: &str = "http://127.0.0.1:8080";
 
 /// Default log file name (in `$TMPDIR`)
 const LOG_FILE_DEFAULT: &str = "lemon.log";
+
+/// Tool factory for lemon subagents.
+#[derive(Debug)]
+struct LemonToolFactory {
+    /// Whether to auto-approve tool calls.
+    zesty: bool,
+
+    /// The main agent's tool gate, inherited by the subagent's tools.
+    gate: llimorse_chat::UserToolGate,
+
+    /// SearXNG URL for web search, if available.
+    searxng_url: Option<String>,
+}
+
+impl llimorse_tools::ToolFactory for LemonToolFactory {
+    fn add_tools(&self, agent: &mut Agent) {
+        agent.add_tool(llimorse_tools::View::new(llimorse_tools::AutoApprove));
+        if self.zesty {
+            agent.add_tool(llimorse_tools::Write::new(llimorse_tools::AutoApprove));
+            agent.add_tool(llimorse_tools::Edit::new(llimorse_tools::AutoApprove));
+            agent.add_tool(llimorse_tools::Bash::new(llimorse_tools::AutoApprove));
+        } else {
+            agent.add_tool(llimorse_tools::Write::new(self.gate.clone()));
+            agent.add_tool(llimorse_tools::Edit::new(self.gate.clone()));
+            agent.add_tool(llimorse_tools::Bash::new(self.gate.clone()));
+        }
+        if let Some(url) = &self.searxng_url {
+            agent.add_tool(llimorse_tools::WebSearch::new(url));
+        }
+    }
+}
 
 derive_merge! {
     /// Command-line arguments for Lemon
@@ -128,21 +160,37 @@ async fn main() -> Result<()> {
 
     let ui_notifications = llimorse_chat::ui::NotificationChannel::new();
 
+    // The subagent's tools inherit the main agent's tool gate, so create it up front.
+    let gate = llimorse_chat::UserToolGate::new(&ui_notifications);
+
     agent.add_tool(llimorse_tools::View::new(llimorse_tools::AutoApprove));
     if args.zesty {
         agent.add_tool(llimorse_tools::Write::new(llimorse_tools::AutoApprove));
         agent.add_tool(llimorse_tools::Edit::new(llimorse_tools::AutoApprove));
         agent.add_tool(llimorse_tools::Bash::new(llimorse_tools::AutoApprove));
     } else {
-        let gate = llimorse_chat::UserToolGate::new(&ui_notifications);
         agent.add_tool(llimorse_tools::Write::new(gate.clone()));
         agent.add_tool(llimorse_tools::Edit::new(gate.clone()));
-        agent.add_tool(llimorse_tools::Bash::new(gate));
+        agent.add_tool(llimorse_tools::Bash::new(gate.clone()));
     }
 
     if let Some(searxng_url) = &args.searxng_url {
         agent.add_tool(llimorse_tools::WebSearch::new(searxng_url));
     }
+
+    let llama_url = args.llama_url.as_deref().unwrap_or(LLAMA_URL_DEFAULT);
+    let subagent = llimorse_tools::Subagent::new(
+        "You are a non-interactive subagent. Execute the tasks given to you and report the result in detail.",
+        llama_url,
+        &agent.client_state().model_name,
+        LemonToolFactory {
+            zesty: args.zesty,
+            gate,
+            searxng_url: args.searxng_url.clone(),
+        },
+        llimorse_chat::SubagentNotifier::new(&ui_notifications),
+    );
+    agent.add_tool(subagent);
 
     // Push the current time and date
     if manager.history.is_empty() {
