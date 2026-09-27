@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use helpers::TruncatedDisplay;
-use llimorse::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -55,7 +55,7 @@ impl KnowledgeFile {
     }
 
     /// Add relevant tools for this file to `agent`.
-    pub fn add_tools(self, agent: &mut Agent<impl ChatListener>) {
+    pub fn add_tools(self, agent: &mut Agent) {
         let this = Arc::new(Mutex::new(self));
 
         agent.add_tool(KnowledgeUpsert::new(Arc::clone(&this)));

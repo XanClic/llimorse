@@ -4,7 +4,7 @@ use super::history::{ChatHistory, HistoryEntryType};
 use super::ui;
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
-use llimorse::{ChatListener, StreamingChunk};
+use llimorse::StreamingChunk;
 use std::collections::VecDeque;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,7 @@ impl ChatAgent {
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
     ///
     /// Will itself set the exit flag before returning.
-    pub async fn run(&mut self, agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
+    pub async fn run(&mut self, agent: llimorse::Agent) -> Result<()> {
         let result = self.do_run(agent).await;
         let _ = self.ui_notifications.send(ui::Notification::Exit);
         result
@@ -110,7 +110,7 @@ impl ChatAgent {
     /// Push all messages currently in `self.queued_messages` onto the agent/chat history.
     ///
     /// This does not yet submit a request to the agent.
-    fn submit_queued_user_messages(&mut self, agent: &mut llimorse::Agent<impl ChatListener>) {
+    fn submit_queued_user_messages(&mut self, agent: &mut llimorse::Agent) {
         let messages = mem::take(&mut self.queued_messages);
         for message in messages {
             let _ = self
@@ -122,7 +122,7 @@ impl ChatAgent {
     }
 
     /// Run agent requests in a loop until the exit flag is set (or an error occurs).
-    async fn do_run(&mut self, mut agent: llimorse::Agent<impl ChatListener>) -> Result<()> {
+    async fn do_run(&mut self, mut agent: llimorse::Agent) -> Result<()> {
         while self.process_notifications().await && self.process_available_notifications() {
             self.submit_queued_user_messages(&mut agent);
 

@@ -1,11 +1,11 @@
 //! Chat log implementation.
 
 use anyhow::anyhow;
+use llimorse::Agent;
 use llimorse::client::TokenUsage;
 use llimorse::line_format::{
     AssistantMessage, ChatMessage, ToolCallParams, ToolResult, UserMessage,
 };
-use llimorse::{Agent, ChatListener};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ pub enum HistoryEntryType {
 }
 
 /// Chat history data
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChatHistory {
     /// Full chat history (split into lines, but not broken by terminal width)
     lines: Vec<(String, HistoryEntryType)>,
@@ -48,17 +48,8 @@ pub struct ChatHistory {
 }
 
 impl ChatHistory {
-    /// Create a new `ChatHistory` object for the given agent
-    pub fn for_agent(agent: &Agent<impl ChatListener>) -> Self {
-        ChatHistory {
-            lines: Vec::new(),
-            token_usage: Arc::clone(agent.token_usage()),
-            open_tool_calls: HashMap::new(),
-        }
-    }
-
     /// Push and format a raw [`ChatMessage`] into the history.
-    pub fn push_raw(&mut self, agent: &Agent<impl ChatListener>, msg: &ChatMessage) {
+    pub fn push_raw(&mut self, agent: &Agent, msg: &ChatMessage) {
         match msg {
             // System message are not shown in chat
             ChatMessage::System(_) => (),
@@ -180,7 +171,7 @@ impl ChatHistory {
     /// Push an error for each tool call that is in the history that has not yet received a result.
     /// This is useful after loading history from an existing session state, which may be
     /// incomplete.
-    pub fn force_resolve_unresolved_tool_calls(&mut self, agent: &mut Agent<impl ChatListener>) {
+    pub fn force_resolve_unresolved_tool_calls(&mut self, agent: &mut Agent) {
         while let Some(id) = self.open_tool_calls.keys().next() {
             let result = ToolResult::new(
                 id.clone(),
@@ -202,7 +193,7 @@ mod tests {
     use llimorse::{Agent, Client};
 
     /// Create a throwaway agent (constructing the client does no network access).
-    fn test_agent() -> Agent<()> {
+    fn test_agent() -> Agent {
         Agent::new(Client::new("http://localhost"))
     }
 

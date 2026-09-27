@@ -12,8 +12,8 @@ use agent::ChatAgent;
 use anyhow::Result;
 use futures::FutureExt;
 pub use history::ChatHistory;
+use llimorse::Agent;
 use llimorse::line_format::ChatMessage;
-use llimorse::{Agent, ChatListener};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
@@ -37,15 +37,12 @@ pub struct App<I: UiState> {
 
 impl<I: UiState> App<I> {
     /// Create a new application state around `agent`, pre-feeding the chat log with `history`.
-    pub fn new_with_history<
-        L: ChatListener + Send + 'static,
-        F: FnOnce(&Agent<L>, Arc<Mutex<ChatHistory>>) -> Result<I>,
-    >(
-        mut agent: Agent<L>,
+    pub fn new_with_history<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
+        mut agent: Agent,
         history: &[ChatMessage],
         create_ui: F,
     ) -> Result<Self> {
-        let mut chat_history = ChatHistory::for_agent(&agent);
+        let mut chat_history = ChatHistory::default();
         for message in history {
             chat_history.push_raw(&agent, message);
         }
@@ -88,11 +85,8 @@ impl<I: UiState> App<I> {
     }
 
     /// Create a new application state around `agent`.
-    pub fn new<
-        L: ChatListener + Send + 'static,
-        F: FnOnce(&Agent<L>, Arc<Mutex<ChatHistory>>) -> Result<I>,
-    >(
-        agent: Agent<L>,
+    pub fn new<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
+        agent: Agent,
         create_ui: F,
     ) -> Result<Self> {
         Self::new_with_history(agent, &[], create_ui)

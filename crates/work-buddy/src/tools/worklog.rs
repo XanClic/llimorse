@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use chrono::format::SecondsFormat;
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate};
 use helpers::TruncatedDisplay;
-use llimorse::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -124,7 +124,7 @@ impl WorklogDirectory {
     }
 
     /// Add relevant tools for the worklog to `agent`.
-    pub fn add_tools(self, agent: &mut Agent<impl ChatListener>) {
+    pub fn add_tools(self, agent: &mut Agent) {
         let this = Arc::new(Mutex::new(self));
 
         agent.add_tool(WorklogAdd::new(Arc::clone(&this)));

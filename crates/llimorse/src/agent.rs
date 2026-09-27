@@ -20,12 +20,12 @@ use std::{fmt, mem};
 
 /// Agent harness around an LLM client.
 #[derive(Debug)]
-pub struct Agent<L: ChatListener = ()> {
+pub struct Agent {
     /// LLM client
     client: Client,
 
     /// Current chat history
-    history: ChatHistory<L>,
+    history: ChatHistory,
 
     /// Pending tool calls the LLM is waiting for
     pending_calls: Vec<ToolCall>,
@@ -40,16 +40,16 @@ pub struct Agent<L: ChatListener = ()> {
 /// Wrapper for the chat history to ensure that everything that is added goes through the
 /// `listener` as well.
 #[derive(Debug)]
-struct ChatHistory<L> {
+struct ChatHistory {
     /// The full current chat history
     history: Vec<ChatMessage>,
 
     /// Push every single new `ChatMessage` through here
-    listener: L,
+    listener: Box<dyn ChatListener>,
 }
 
 /// Trait for an object listening to chat updates
-pub trait ChatListener: fmt::Debug {
+pub trait ChatListener: fmt::Debug + Send {
     /// The given chat message is added to the chat history; log it.
     fn log_message(&mut self, message: &ChatMessage);
 
@@ -119,13 +119,13 @@ pub trait CallableTool: ToolState {
 
 /// Request currently being executed by the LLM.
 #[pin_project(project = AgentRunningProjection)]
-pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> {
+pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     /// The results as it is begin generated
     #[pin]
     streaming: StreamingResult<S>,
 
     /// Reference to the [`Agent`] object to push back the results
-    agent: &'a mut Agent<L>,
+    agent: &'a mut Agent,
 
     /// Whether the request is done
     terminated: bool,
@@ -133,10 +133,10 @@ pub struct AgentRunning<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: 
 
 /// `Future` to await a full agent response without streaming
 #[pin_project]
-pub struct AgentResponse<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> {
+pub struct AgentResponse<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> {
     /// Don’t tell anyone, but we actually do still stream, secretly.
     #[pin]
-    stream: AgentRunning<'a, S, L>,
+    stream: AgentRunning<'a, S>,
 }
 
 impl Agent {
@@ -171,10 +171,10 @@ impl Agent {
     }
 }
 
-impl<L: ChatListener> Agent<L> {
+impl Agent {
     /// Create a new agent harness around the given [`Client`] with `listener` receiving new chat
     /// messages.
-    pub fn new_with_listener(client: Client, listener: L) -> Self {
+    pub fn new_with_listener(client: Client, listener: impl ChatListener + 'static) -> Self {
         Agent {
             client,
             history: ChatHistory::with_listener(listener),
@@ -238,7 +238,7 @@ impl<L: ChatListener> Agent<L> {
     /// messages.
     pub async fn submit(
         &mut self,
-    ) -> Result<AgentRunning<'_, impl Stream<Item = reqwest::Result<bytes::Bytes>>, L>> {
+    ) -> Result<AgentRunning<'_, impl Stream<Item = reqwest::Result<bytes::Bytes>>>> {
         let streaming = {
             self.client
                 .chat_stream(
@@ -261,8 +261,8 @@ impl<L: ChatListener> Agent<L> {
     /// Return whether any have been executed, in which case the results will need to be submitted
     /// to the LLM.
     pub async fn execute_pending_calls<
-        F1: FnMut(&Agent<L>, &ToolCall) -> Result<()>,
-        F2: FnMut(&Agent<L>, &ToolCall, &Result<String>) -> Result<()>,
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
     >(
         &mut self,
         mut tool_guard: F1,
@@ -351,7 +351,7 @@ impl<L: ChatListener> Agent<L> {
     }
 }
 
-impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> AgentRunning<'a, S, L> {
+impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunning<'a, S> {
     /// Same as [`Agent::execute_pending_calls()`].
     ///
     /// The problem is that [`AgentRunning`] retains a reference to [`Agent`] while it lives, so
@@ -364,8 +364,8 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     ///
     /// Panics if [`AgentRunning::is_terminated()`] is false.
     pub async fn execute_pending_calls<
-        F1: FnMut(&Agent<L>, &ToolCall) -> Result<()>,
-        F2: FnMut(&Agent<L>, &ToolCall, &Result<String>) -> Result<()>,
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
     >(
         self,
         tool_guard: F1,
@@ -378,12 +378,12 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     }
 
     /// Await the full response instead of a stream of parts.
-    pub fn full_response(self) -> AgentResponse<'a, S, L> {
+    pub fn full_response(self) -> AgentResponse<'a, S> {
         AgentResponse { stream: self }
     }
 
     /// Return the agent for this in-progress request
-    pub fn agent(&self) -> &Agent<L> {
+    pub fn agent(&self) -> &Agent {
         self.agent
     }
 
@@ -404,18 +404,14 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener>
-    AgentRunningProjection<'_, '_, S, L>
-{
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentRunningProjection<'_, '_, S> {
     /// Mark the stream as terminated.
     fn terminate(&mut self) {
         *self.terminated = true;
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Stream
-    for AgentRunning<'_, S, L>
-{
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> Stream for AgentRunning<'_, S> {
     type Item = Result<StreamingChunk>;
 
     fn poll_next(
@@ -457,15 +453,13 @@ impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Stream
     }
 }
 
-impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> FusedStream
-    for AgentRunning<'_, S, L>
-{
+impl<S: Stream<Item = reqwest::Result<bytes::Bytes>>> FusedStream for AgentRunning<'_, S> {
     fn is_terminated(&self) -> bool {
         self.terminated
     }
 }
 
-impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> AgentResponse<'a, S, L> {
+impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>> AgentResponse<'a, S> {
     /// Same as [`Agent::execute_pending_calls()`].
     ///
     /// The problem is that [`AgentResponse`] retains a reference to [`Agent`] while it lives, so
@@ -478,8 +472,8 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
     ///
     /// Panics if `self` has not been awaited yet.
     pub async fn execute_pending_calls<
-        F1: FnMut(&Agent<L>, &ToolCall) -> Result<()>,
-        F2: FnMut(&Agent<L>, &ToolCall, &Result<String>) -> Result<()>,
+        F1: FnMut(&Agent, &ToolCall) -> Result<()>,
+        F2: FnMut(&Agent, &ToolCall, &Result<String>) -> Result<()>,
     >(
         self,
         tool_guard: F1,
@@ -494,15 +488,15 @@ impl<'a, S: Stream<Item = reqwest::Result<bytes::Bytes>>, L: ChatListener> Agent
 }
 
 /// Helper struct for properly formatting call parameters for display.
-pub struct DisplayCall<'a, L: ChatListener> {
+pub struct DisplayCall<'a> {
     /// Agent; required to parse the call parameters
-    agent: &'a Agent<L>,
+    agent: &'a Agent,
 
     /// Raw call parameters
     call: &'a ToolCallParams,
 }
 
-impl<L: ChatListener> fmt::Display for DisplayCall<'_, L> {
+impl fmt::Display for DisplayCall<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.call {
             ToolCallParams::Function { function } => {
@@ -521,9 +515,9 @@ impl<L: ChatListener> fmt::Display for DisplayCall<'_, L> {
 }
 
 /// Helper struct for properly formatting a call result for display.
-pub struct DisplayCallResult<'a, L: ChatListener> {
+pub struct DisplayCallResult<'a> {
     /// Agent; required to parse the call result
-    agent: &'a Agent<L>,
+    agent: &'a Agent,
 
     /// Raw call parameters
     call: &'a ToolCallParams,
@@ -532,7 +526,7 @@ pub struct DisplayCallResult<'a, L: ChatListener> {
     result: &'a String,
 }
 
-impl<L: ChatListener> fmt::Display for DisplayCallResult<'_, L> {
+impl fmt::Display for DisplayCallResult<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.call {
             ToolCallParams::Function { function } => {
@@ -548,12 +542,12 @@ impl<L: ChatListener> fmt::Display for DisplayCallResult<'_, L> {
     }
 }
 
-impl<L: ChatListener> ChatHistory<L> {
+impl ChatHistory {
     /// Create a new `ChatHistory` instance, notifying `listener` on additions.
-    fn with_listener(listener: L) -> Self {
+    fn with_listener(listener: impl ChatListener + 'static) -> Self {
         ChatHistory {
             history: Vec::new(),
-            listener,
+            listener: Box::new(listener),
         }
     }
 

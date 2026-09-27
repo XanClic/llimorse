@@ -8,7 +8,7 @@ mod wrap;
 use anyhow::Result;
 use crossterm::event as ct;
 use futures::StreamExt;
-use llimorse::{Agent, ChatListener};
+use llimorse::Agent;
 use llimorse_chat::history::HistoryEntryType;
 use llimorse_chat::{ChatHistory, ui};
 use ratatui::layout::{Alignment, Constraint, Layout, Margin};
@@ -63,7 +63,7 @@ pub struct TermUi {
 
 impl TermUi {
     /// Create the term state with `chat_history`
-    pub fn new(agent: &Agent<impl ChatListener>, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
+    pub fn new(agent: &Agent, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
         let term = ratatui::init();
         set_up_term();
 

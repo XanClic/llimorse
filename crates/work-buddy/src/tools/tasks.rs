@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use chrono::Local;
 use chrono::format::SecondsFormat;
 use helpers::TruncatedDisplay;
-use llimorse::{Agent, CallableTool, ChatListener};
+use llimorse::{Agent, CallableTool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ impl TaskFile {
     /// Inject the list of active tasks as system messages
     ///
     /// This also includes critical backlog items.
-    pub fn inject_active_tasks(&self, agent: &mut Agent<impl ChatListener>) {
+    pub fn inject_active_tasks(&self, agent: &mut Agent) {
         let active_tasks = self.content.iter().filter(|(_, task)| {
             task.settable.status != TaskStatus::Backlog
                 || task.settable.priority == TaskPriority::Critical
@@ -100,7 +100,7 @@ impl TaskFile {
     }
 
     /// Add relevant tools for this file to `agent`.
-    pub fn add_tools(self, agent: &mut Agent<impl ChatListener>) {
+    pub fn add_tools(self, agent: &mut Agent) {
         let this = Arc::new(Mutex::new(self));
 
         agent.add_tool(TaskAdd::new(Arc::clone(&this)));
