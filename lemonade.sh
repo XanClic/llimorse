@@ -9,9 +9,9 @@
 #   lemonade.sh <extra args> # forwarded after --zesty
 #   lemonade.sh --system <host file> # push a system prompt file (any
 #                                     # host path) into the container;
-#                                     # with no --system, AGENTS.md /
-#                                     # CLAUDE.md in the working directory
-#                                     # is pushed in automatically
+#                                     # with no --system, LEMON.md / AGENTS.md
+#                                     # / CLAUDE.md in the working directory
+#                                     # are pushed in automatically
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
@@ -102,9 +102,9 @@ printf '      Sessions:   %s (lemon session logs; the --resume handle)\n' "$SESS
 # container (unlike its other path flags it is not a container path), so
 # lemonade.sh intercepts it and bind-mounts the host file — any path, in
 # the repo or not — at /system-prompt.md, forwarding the container path.
-# With no --system given, AGENTS.md / CLAUDE.md in the working directory
-# (where lemonade.sh was invoked, any subdirectory) is detected later and
-# pushed in; an explicit --system always wins.
+# With no --system given, LEMON.md / AGENTS.md / CLAUDE.md in the working
+# directory (where lemonade.sh was invoked, any subdirectory) is detected later
+# and pushed in; an explicit --system always wins.
 #
 # --force-fresh: discard the worktree's state — the divergence gate below
 # would refuse to start while it holds un-fetched work — or simply start
@@ -172,7 +172,7 @@ LEMON_BIN=$(realpath "$LEMON_BIN")
 if [ -n "$SYSFILE" ]; then
     [ -f "$SYSFILE" ] || { err "System prompt file not found: $SYSFILE"; exit 1; }
 else
-    for cand in AGENTS.md CLAUDE.md; do
+    for cand in LEMON.md AGENTS.md CLAUDE.md; do
         if [ -f "$cand" ]; then
             SYSFILE="$cand"
             note "Using $SYSFILE in the working directory as the system prompt"
