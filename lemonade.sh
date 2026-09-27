@@ -13,7 +13,13 @@
 #                                     # in the order given —; with no
 #                                     # --system, LEMON.md / AGENTS.md /
 #                                     # CLAUDE.md in the working directory
-#                                     # are pushed in automatically
+#                                     # are pushed in automatically. Before
+#                                     # any of them, a short built-in
+#                                     # description of the container
+#                                     # environment is always passed as a
+#                                     # --system file of its own, noting the
+#                                     # agent is free to do whatever it
+#                                     # wants, including installing packages
 #   lemonade.sh --resume /sessions/<file> # continue a previous session
 #   lemonade.sh --force-fresh # the worktree holds work this checkout
 #                             # lacks, or a clean slate is wanted: wipe
@@ -167,6 +173,35 @@ LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
 # is fine: the -x check above guarantees the file exists.)
 LEMON_BIN=$(realpath "$LEMON_BIN")
 
+# Environment description: an unconditional --system file that comes before
+# the user's (resolved below), or stands alone when no user file is chosen.
+# Lemon's --system is repeatable and concatenates the files in the order
+# given, so this is the head and the user's instructions follow. It is
+# embedded in this script, written to a temp file, and mounted at
+# /system-prompt-env.md: what the agent runs in, and that it is free to do
+# whatever it wants, including installing more packages.
+ENV_PROMPT=$(mktemp "${TMPDIR:-/tmp}/lemonade-prompt.XXXXXX")
+cat > "$ENV_PROMPT" <<'LEMONADE_PROMPT'
+You are an agent running as root inside a disposable Podman container (Fedora),
+with the working directory /work: the git repository of the project to work on.
+The container itself — including anything you install into it — is deleted when
+the session ends. What is in /work lives on tmpfs on the host and will survive
+for the user to fetch the results.
+
+You are free to do whatever you want. A full development toolchain is
+preinstalled (git, rustup with a nightly toolchain, cargo, make/gcc, python3
+and pip, tmux, ripgrep, curl, and more); whenever you need anything else,
+install it — `dnf install -y <package>`, `pip install <package>`, or however
+else you like. Installs made at runtime live in the container's writable layer
+and die with it, so install what you need, when you need it.
+LEMONADE_PROMPT
+# The cleanup trap further down also removes this; the early trap covers the
+# window before it is installed (a gate refusal, pull or build failure).
+trap 'rm -f "$ENV_PROMPT"' EXIT
+# The environment description is unconditional and comes first: the user's
+# --system file, resolved below, is appended after it.
+set -- "$@" --system /system-prompt-env.md
+
 # System prompt file(s): resolved here, before any pulling or building, so
 # a mistyped --system fails at once. With no --system, LEMON.md / AGENTS.md
 # / CLAUDE.md in the working directory is picked up. Several --system files
@@ -185,9 +220,9 @@ if [ ${#SYSFILES[@]} -gt 0 ]; then
     else
         SYSFILE=$(mktemp "${TMPDIR:-/tmp}/lemon-system-prompt.XXXXXX")
         SYSFILE_TEMP="$SYSFILE"
-        # The cleanup trap further down also removes this; the early trap
+        # The cleanup trap further down also removes these; the early trap
         # covers the window before it is installed (a pull or build failure).
-        trap 'rm -f "$SYSFILE_TEMP"' EXIT
+        trap 'rm -f "$ENV_PROMPT" "$SYSFILE_TEMP"' EXIT
         first=1
         for f in "${SYSFILES[@]}"; do
             if [ "$first" -eq 1 ]; then first=0; else printf '\n\n' >> "$SYSFILE"; fi
@@ -525,6 +560,7 @@ cleanup() {
     podman network rm "$NET" >/dev/null 2>&1 || true
     rm -f "$SEARXNG_SETTINGS"
     rm -f "$SYSFILE_TEMP"
+    rm -f "$ENV_PROMPT"
 }
 trap cleanup EXIT
 
@@ -537,7 +573,8 @@ note "SearXNG sidecar running — lemon's web_search backend (container '$SEARXN
 
 MOUNTS=(-v "$WORKTREE:/work:z"
         -v "$SESSIONS:/sessions:z"
-        -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z")
+        -v "$LEMON_BIN:/usr/local/bin/lemon:ro,z"
+        -v "$ENV_PROMPT:/system-prompt-env.md:ro,z")
 # Build artifacts: when the repo root has a Cargo.toml, an anonymous
 # volume at /work/target — cargo's default target directory — so builds
 # land on disk rather than the worktree's tmpfs, and die with the

@@ -62,7 +62,8 @@ Steps:
    network.
 5. `podman run --rm -it` on that network with the worktree, the
    per-checkout session-log directory at `/sessions`, and the lemon
-   binary bind-mounted — plus the system prompt file at
+   binary bind-mounted — plus the built-in environment description at
+   `/system-prompt-env.md`, always, and the chosen system prompt file at
    `/system-prompt.md` when one is chosen (see System prompt below) —
    running `lemon --zesty --llama-url
    http://<LLAMA_HOST>:8080 --searxng-url http://lemonade-searxng-<pid>:8080
@@ -256,14 +257,23 @@ so lemon still only ever sees the single `/system-prompt.md`. The temp
 file dies with the session (the EXIT trap removes it); a single
 `--system` file is mounted directly, no temp file.
 
-With no `--system` given, `AGENTS.md` / `CLAUDE.md` in the working
-directory — where lemonade was invoked, any subdirectory, deliberately
-not the top-level — is detected and pushed in, `AGENTS.md` first: these
-are where per-project agent instructions already conventionally live, so
-the common case needs no flag, and the vendor-neutral name wins when a
-directory carries both. An explicit `--system` always wins, a
-missing file is a clear error before anything is pulled or built, and
-no candidate means no `--system` at all — lemon's default stands.
+With no `--system` given, `LEMON.md` / `AGENTS.md` / `CLAUDE.md` in the
+working directory — where lemonade was invoked, any subdirectory,
+deliberately not the top-level — is detected and pushed in, in that
+order: these are where per-project agent instructions already
+conventionally live, so the common case needs no flag. An explicit
+`--system` always wins, and a missing file is a clear error before
+anything is pulled or built.
+
+A first `--system` file is pushed in unconditionally, before whatever the
+above chose (or alone, when nothing was chosen): a short description of
+the environment the agent runs in, embedded in the script, written to a
+temp file, and mounted read-only at `/system-prompt-env.md`. It tells
+the agent that it is root in a disposable Fedora container with `/work`
+on tmpfs, that a full toolchain is preinstalled, and that it is free to
+do whatever it wants — including installing more packages with dnf or
+pip, whose installs die with the container. It is passed first, so in
+the concatenated prompt the environment precedes the user's file.
 
 ## The lemon binary
 
