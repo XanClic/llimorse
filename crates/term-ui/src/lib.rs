@@ -595,11 +595,17 @@ impl ui::UiState for TermUi {
             ui::Notification::SubagentCreated {
                 subagent_id,
                 prompt,
+                client_info,
                 client_state,
                 chat_history,
             } => {
-                self.agents
-                    .add_subagent(subagent_id, prompt, client_state, chat_history);
+                self.agents.add_subagent(
+                    subagent_id,
+                    prompt,
+                    client_info,
+                    client_state,
+                    chat_history,
+                );
             }
             ui::Notification::SubagentDropped { subagent_id } => {
                 self.agents.remove_subagent(subagent_id);
@@ -698,10 +704,12 @@ impl UiAgents {
         &mut self,
         subagent_id: SubagentId,
         prompt: String,
+        client_info: ClientInfo,
         client_state: Arc<RwLock<ClientState>>,
         history: Arc<Mutex<ChatHistory>>,
     ) {
         self.state.push(AgentState {
+            client_info,
             client_state,
             history,
             subagent_state: Some(SubagentState {

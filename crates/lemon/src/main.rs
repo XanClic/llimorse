@@ -202,8 +202,22 @@ async fn main() -> Result<()> {
 
     if !manager.history.is_empty() {
         agent.push_history(manager.history.clone());
-    } else if let Some(system_prompt) = system_prompt {
-        agent.push_system(system_prompt);
+    } else {
+        // Fold a general date/model note into the system message.
+        let now = Local::now();
+        let model_name = display_model_name(&agent.client_info().model_name);
+        let date_note = format!(
+            "The current date and time is {}, {}. Your model name is {2}, and you are running in the lemon harness. \
+             Sign git commits with \"Co-Authored-by: {2} on lemon <lemon@localhost>\".",
+            now.weekday(),
+            now.to_rfc3339_opts(SecondsFormat::Secs, false),
+            model_name,
+        );
+        let system = match system_prompt {
+            Some(prompt) => format!("{prompt}\n\n{date_note}"),
+            None => date_note,
+        };
+        agent.push_system(system);
     }
 
     let ui_notifications = llimorse_chat::ui::NotificationChannel::new();
@@ -230,7 +244,7 @@ async fn main() -> Result<()> {
     let subagent = llimorse_tools::Subagent::new(
         &subagent_system,
         llama_url,
-        &agent.client_state().model_name,
+        &agent.client_info().model_name,
         LemonToolFactory {
             zesty: args.zesty,
             gate,
@@ -239,19 +253,6 @@ async fn main() -> Result<()> {
         llimorse_chat::SubagentNotifier::new(&ui_notifications),
     );
     agent.add_tool(subagent);
-
-    // Push the current time and date
-    if manager.history.is_empty() {
-        let now = Local::now();
-        let model_name = display_model_name(&agent.client_info().model_name);
-        agent.push_system(format!(
-            "The current date and time is {}, {}. Your model name is {2}, and you are running in the lemon harness. \
-             Sign git commits with \"Co-Authored-by: {2} on lemon <lemon@localhost>\".",
-            now.weekday(),
-            now.to_rfc3339_opts(SecondsFormat::Secs, false),
-            model_name,
-        ));
-    }
 
     let mut app = llimorse_chat::App::new_with_history(
         agent,

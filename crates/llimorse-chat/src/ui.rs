@@ -1,7 +1,7 @@
 //! UI connector for llimorse-chat UIs
 
 use crate::ChatHistory;
-use llimorse::client::ClientState;
+use llimorse::client::{ClientInfo, ClientState};
 use parking_lot::RwLock;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -106,6 +106,9 @@ pub enum Notification {
 
         /// Prompt for the subagent
         prompt: String,
+
+        /// The immutable information of the client to which the subagent is connected
+        client_info: ClientInfo,
 
         /// The state of the client to which the subagent is connected
         client_state: Arc<RwLock<ClientState>>,

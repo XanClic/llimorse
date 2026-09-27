@@ -108,6 +108,7 @@ impl llimorse_tools::subagent::SubagentNotifier for SubagentNotifier {
         let _ = self.notifications.send(ui::Notification::SubagentCreated {
             subagent_id: subagent.id,
             prompt: prompt.to_string(),
+            client_info: agent.client_info().clone(),
             client_state: agent.client_state_arc(),
             chat_history: Arc::clone(&subagent.chat_history),
         });
