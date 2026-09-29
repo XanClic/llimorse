@@ -4,23 +4,23 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 pub mod agent;
-pub mod history;
 pub mod log;
 pub mod tools;
 pub mod ui;
 
 use agent::ChatAgent;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::FutureExt;
-pub use history::ChatHistory;
 use llimorse::Agent;
-use llimorse::line_format::ChatMessage;
-use std::sync::{Arc, Mutex};
+use llimorse::line_format::{ChatMessage, ToolCall};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 pub use tools::{SubagentNotifier, UserToolGate};
-pub use ui::UiState;
+use ui::AgentUpdate;
+pub use ui::{AgentId, UiState};
 
 /// The application state
 pub struct App<I: UiState> {
@@ -39,24 +39,21 @@ pub struct App<I: UiState> {
 
 impl<I: UiState> App<I> {
     /// Create a new application state around `agent`, pre-feeding the chat log with `history`.
-    pub fn new_with_history<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
-        mut agent: Agent,
+    pub fn new_with_history<F: FnOnce(&Agent) -> Result<I>>(
+        agent: Agent,
         history: &[ChatMessage],
         ui_notifications: ui::NotificationChannel,
         create_ui: F,
     ) -> Result<Self> {
-        let mut chat_history = ChatHistory::default();
-        for message in history {
-            chat_history.push_raw(&agent, message);
-        }
-        chat_history.force_resolve_unresolved_tool_calls(&mut agent);
-
-        let chat_history = Arc::new(Mutex::new(chat_history));
-
-        let ui = create_ui(&agent, Arc::clone(&chat_history))?;
+        let ui = create_ui(&agent)?;
 
         let (agent_notifications, recv_agent_notifications) = mpsc::unbounded_channel();
-        let ui_notification_sender = ui_notifications.sender();
+        let mut ui_notification_sender = ui_notifications.sender();
+
+        if !history.is_empty() {
+            Self::push_history(&mut ui_notification_sender, history, &agent)
+                .map_err(|err| anyhow!("Failed to load history: {err}"))?;
+        }
 
         let agent_thread = thread::spawn({
             move || {
@@ -66,7 +63,6 @@ impl<I: UiState> App<I> {
                     .unwrap()
                     .block_on(async move {
                         let mut wba = ChatAgent::new(
-                            chat_history,
                             recv_agent_notifications,
                             Arc::new(ui_notification_sender),
                         );
@@ -88,7 +84,7 @@ impl<I: UiState> App<I> {
     }
 
     /// Create a new application state around `agent`.
-    pub fn new<F: FnOnce(&Agent, Arc<Mutex<ChatHistory>>) -> Result<I>>(
+    pub fn new<F: FnOnce(&Agent) -> Result<I>>(
         agent: Agent,
         ui_notifications: ui::NotificationChannel,
         create_ui: F,
@@ -150,6 +146,81 @@ impl<I: UiState> App<I> {
                 }
             }
         }
+    }
+
+    /// Push everything in `history` onto `sender`, thus displaying it
+    fn push_history(
+        sender: &mut mpsc::UnboundedSender<ui::Notification>,
+        history: &[ChatMessage],
+        agent: &Agent,
+    ) -> Result<()> {
+        let agent_update = |update: AgentUpdate| {
+            let _ = sender.send(ui::Notification::AgentUpdate {
+                agent_id: AgentId::Main,
+                content: update,
+            });
+        };
+
+        let mut open_calls = HashMap::<String, ToolCall>::new();
+
+        for message in history {
+            match message {
+                ChatMessage::System(_) => (), // ignored
+                ChatMessage::User(msg) => {
+                    agent_update(AgentUpdate::User {
+                        prompt: msg.content.clone(),
+                    });
+                }
+                ChatMessage::Assistant(msg) => {
+                    if let Some(reasoning) = &msg.reasoning_content {
+                        agent_update(AgentUpdate::Reasoning {
+                            append: reasoning.clone(),
+                        });
+                    }
+                    if let Some(content) = &msg.content {
+                        agent_update(AgentUpdate::Content {
+                            append: content.clone(),
+                        });
+                    }
+                    if let Some(calls) = &msg.tool_calls {
+                        for call in calls {
+                            agent_update(AgentUpdate::ToolCallEx {
+                                call: call.clone(),
+                                display: agent.display_call(&call.call).to_string(),
+                            });
+                            open_calls.insert(call.id.clone(), call.clone());
+                        }
+                    }
+                }
+                ChatMessage::Tool(result) => {
+                    let call = open_calls.remove(&result.tool_call_id).ok_or_else(|| {
+                        anyhow!(
+                            "Tool call result references unknown call ID {}",
+                            result.tool_call_id
+                        )
+                    })?;
+
+                    let result = &result.content;
+                    if let Some(error) = result
+                        .strip_prefix("TOOL CALL FAILED: ")
+                        .or_else(|| result.strip_prefix("TOOL CALL REJECTED: "))
+                    {
+                        agent_update(AgentUpdate::ToolResultEx {
+                            call,
+                            display: Err(error.to_string()),
+                        })
+                    } else {
+                        let display = agent.display_call_result(&call.call, result).to_string();
+                        agent_update(AgentUpdate::ToolResultEx {
+                            call,
+                            display: Ok(display),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

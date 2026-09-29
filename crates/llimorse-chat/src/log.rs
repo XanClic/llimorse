@@ -3,7 +3,8 @@
 use anyhow::{Result, anyhow};
 use chrono::Local;
 use llimorse::ChatListener;
-use llimorse::line_format::ChatMessage;
+use llimorse::line_format::{AssistantMessage, ChatMessage, ToolCall, ToolResult};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
@@ -188,7 +189,10 @@ impl SessionManager {
             None => SessionLog::null(),
         };
 
-        Ok(SessionManager { log, history })
+        let mut mgr = SessionManager { log, history };
+        mgr.force_resolve_unresolved_tool_calls();
+
+        Ok(mgr)
     }
 
     /// Find the newest non-empty session log in `dir`, by modification time (ties broken by name,
@@ -267,6 +271,47 @@ impl SessionManager {
     /// A session log file name, timestamped so that names sort chronologically.
     fn new_log_name() -> String {
         Local::now().format("%Y-%m-%dT%H_%M_%S.jsonl").to_string()
+    }
+
+    /// After loading the history, force-resolve all tool calls that have not received a result.
+    fn force_resolve_unresolved_tool_calls(&mut self) {
+        let mut open_tool_calls = HashMap::<String, &ToolCall>::new();
+
+        for message in &self.history {
+            match message {
+                ChatMessage::Assistant(AssistantMessage {
+                    content: _,
+                    reasoning_content: _,
+                    tool_calls: Some(tool_calls),
+                }) => {
+                    for call in tool_calls {
+                        open_tool_calls.insert(call.id.clone(), call);
+                    }
+                }
+
+                ChatMessage::Tool(ToolResult {
+                    tool_call_id: id,
+                    content: _,
+                }) => {
+                    open_tool_calls.remove(id);
+                }
+
+                _ => (),
+            }
+        }
+
+        let unresolved = open_tool_calls.into_keys().collect::<Vec<_>>();
+
+        for id in unresolved {
+            let result = ToolResult::new(
+                id,
+                Err(anyhow!(
+                    "Tool call aborted due to incomplete session state, please retry"
+                )),
+            );
+
+            self.history.push(result.into());
+        }
     }
 }
 

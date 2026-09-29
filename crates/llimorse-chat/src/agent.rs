@@ -1,21 +1,17 @@
 //! Handle the agent-running part.
 
-use super::history::{ChatHistory, HistoryEntryType};
-use super::ui::{self, AgentId};
+use super::ui::{self, AgentId, AgentUpdate};
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use llimorse::line_format::{ChatMessage, ToolCall};
 use llimorse::{Agent, StreamingChunk};
 use std::collections::VecDeque;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// State of the agent-running part of the llimorse-based chat application
 pub(super) struct ChatAgent {
-    /// The chat history as shared with the agent
-    chat_history: Arc<Mutex<ChatHistory>>,
-
     /// Notify the UI to redraw
     ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
 
@@ -55,12 +51,10 @@ pub(super) enum Notification {
 impl ChatAgent {
     /// Create a new instance.
     pub fn new(
-        chat_history: Arc<Mutex<ChatHistory>>,
         notifications: mpsc::UnboundedReceiver<Notification>,
         ui_notifications: Arc<mpsc::UnboundedSender<ui::Notification>>,
     ) -> Self {
         ChatAgent {
-            chat_history,
             incoming: Some(Incoming {
                 notifications,
                 queued_messages: VecDeque::new(),
@@ -142,10 +136,9 @@ impl ChatAgent {
         let messages = mem::take(&mut incoming.queued_messages);
         let any_messages = !messages.is_empty();
         for message in messages {
-            let _ = self
-                .ui_notifications
-                .send(ui::Notification::PromptSubmitted);
-            self.push_history(&message, HistoryEntryType::User);
+            self.send_update(AgentUpdate::User {
+                prompt: message.clone(),
+            });
             agent.push_user(message);
         }
 
@@ -200,28 +193,23 @@ impl ChatAgent {
                 let mut incoming = self.incoming.take().expect("Notifications object taken");
 
                 let check_calls = |agent: &Agent, call: &ToolCall| {
-                    self.push_history(
-                        &format!("[{}] {}\n", call.id, agent.display_call(&call.call)),
-                        HistoryEntryType::ToolCall,
-                    );
+                    self.send_update(AgentUpdate::ToolCallEx {
+                        call: call.clone(),
+                        display: agent.display_call(&call.call).to_string(),
+                    });
                     Ok(())
                 };
 
                 let check_results = |agent: &Agent, call: &ToolCall, result: &Result<String>| {
-                    let name = call.call.name();
-                    let id = &call.id;
                     match result {
-                        Ok(result) => self.push_history(
-                            &format!(
-                                "=[{name}/{id}]=> {}\n",
-                                agent.display_call_result(&call.call, result)
-                            ),
-                            HistoryEntryType::ToolResultOk,
-                        ),
-                        Err(err) => self.push_history(
-                            &format!("=[{name}/{id}]=> {err}\n"),
-                            HistoryEntryType::ToolResultErr,
-                        ),
+                        Ok(result) => self.send_update(AgentUpdate::ToolResultEx {
+                            call: call.clone(),
+                            display: Ok(agent.display_call_result(&call.call, result).to_string()),
+                        }),
+                        Err(err) => self.send_update(AgentUpdate::ToolResultEx {
+                            call: call.clone(),
+                            display: Err(err.to_string()),
+                        }),
                     }
                     Ok(())
                 };
@@ -270,23 +258,18 @@ impl ChatAgent {
 
     /// Process the incoming `chunk` from the LLM (i.e. append it to the history).
     fn process_chunk(&self, chunk: StreamingChunk) {
-        let (string, kind) = match chunk {
-            StreamingChunk::Content(content) => (content, HistoryEntryType::Content),
-            StreamingChunk::Reasoning(content) => (content, HistoryEntryType::Reasoning),
+        let update = match chunk {
+            StreamingChunk::Content(content) => AgentUpdate::Content { append: content },
+            StreamingChunk::Reasoning(content) => AgentUpdate::Reasoning { append: content },
         };
-
-        self.push_history(&string, kind);
+        self.send_update(update);
     }
 
-    /// Push the given string into the chat history, processing newlines
-    fn push_history(&self, string: &str, kind: HistoryEntryType) {
-        let mut history = self.chat_history.lock().unwrap();
-        // Put user messages on a new line, always, as they can never be streamed content
-        history.push_lines(string, kind, kind == HistoryEntryType::User);
-        drop(history);
-
-        let _ = self.ui_notifications.send(ui::Notification::UpdateAgent {
+    /// Submit a chat update to the UI
+    fn send_update(&self, update: AgentUpdate) {
+        let _ = self.ui_notifications.send(ui::Notification::AgentUpdate {
             agent_id: AgentId::Main,
+            content: update,
         });
     }
 }

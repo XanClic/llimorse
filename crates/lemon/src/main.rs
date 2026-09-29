@@ -264,12 +264,10 @@ async fn main() -> Result<()> {
     );
     agent.add_tool(subagent);
 
-    let mut app = llimorse_chat::App::new_with_history(
-        agent,
-        &manager.history,
-        ui_notifications,
-        |agent, history| Ok(TermUi::new("Lemon", agent, history)),
-    )?;
+    let mut app =
+        llimorse_chat::App::new_with_history(agent, &manager.history, ui_notifications, |agent| {
+            Ok(TermUi::new("Lemon", agent))
+        })?;
 
     app.run().await
 }

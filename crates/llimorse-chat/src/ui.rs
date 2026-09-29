@@ -1,10 +1,10 @@
 //! UI connector for llimorse-chat UIs
 
-use crate::ChatHistory;
 use llimorse::client::{ClientInfo, ClientState};
+use llimorse::line_format::ToolCall;
 use parking_lot::RwLock;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// UI state for interacting with the llimorse-chat application
@@ -48,6 +48,11 @@ impl SubagentId {
     pub const fn new(id: usize) -> Self {
         Self(id)
     }
+
+    /// Return the inner numeric ID
+    pub fn raw(&self) -> usize {
+        self.0
+    }
 }
 
 impl fmt::Display for SubagentId {
@@ -66,6 +71,12 @@ pub enum AgentId {
     Subagent(SubagentId),
 }
 
+impl From<SubagentId> for AgentId {
+    fn from(subagent: SubagentId) -> Self {
+        AgentId::Subagent(subagent)
+    }
+}
+
 /// Notifications to the UI
 #[derive(Debug)]
 pub enum Notification {
@@ -76,16 +87,16 @@ pub enum Notification {
     Update,
 
     /// The given agent’s history has been updated
-    UpdateAgent {
+    AgentUpdate {
         /// The ID of the agent whose history was updated
         agent_id: AgentId,
+
+        /// The content update
+        content: AgentUpdate,
     },
 
     /// User message queued to be submitted to the LLM
     PromptQueued(String),
-
-    /// User message has been submitted to the LLM
-    PromptSubmitted,
 
     /// The current prompt iteration is complete; the agent is now awaiting a new prompt
     AwaitingPrompt {
@@ -115,15 +126,60 @@ pub enum Notification {
 
         /// The state of the client to which the subagent is connected
         client_state: Arc<RwLock<ClientState>>,
-
-        /// Subagent’s chat history
-        chat_history: Arc<Mutex<ChatHistory>>,
     },
 
     /// A subagent is done and has been dropped
     SubagentDropped {
         /// The subagent’s ID
         subagent_id: SubagentId,
+    },
+}
+
+/// A content update from an LLM agent
+#[derive(Debug)]
+pub enum AgentUpdate {
+    /// A full user prompt has been submitted
+    User {
+        /// The user prompt
+        prompt: String,
+    },
+
+    /// More reasoning generated
+    ///
+    /// If the last update was not a `Reasoning` update, this opens a new reasoning block.
+    Reasoning {
+        /// Append this to the reasoning block
+        append: String,
+    },
+
+    /// More content generated
+    ///
+    /// If the last update was not a `Content` update, this opens a new content block.
+    Content {
+        /// Append this to the content block
+        append: String,
+    },
+
+    /// Full tool call
+    ///
+    /// TODO: Remove, and replace by iterative version with parsing done elsewhere
+    ToolCallEx {
+        /// The full call
+        call: ToolCall,
+
+        /// The tool call, when displayed
+        display: String,
+    },
+
+    /// Full tool call results
+    ///
+    /// TODO: Remove, and replace by iterative version with parsing done elsewhere
+    ToolResultEx {
+        /// The full call
+        call: ToolCall,
+
+        /// The tool call, when displayed
+        display: Result<String, String>,
     },
 }
 

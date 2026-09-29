@@ -12,9 +12,7 @@ use helpers::TruncatedDisplay;
 use llimorse::Agent;
 use llimorse::agent::AgentStage;
 use llimorse::client::{ClientInfo, ClientState};
-use llimorse_chat::history::HistoryEntryType;
-use llimorse_chat::ui::{AgentId, SubagentId};
-use llimorse_chat::{ChatHistory, ui};
+use llimorse_chat::ui::{self, AgentId, AgentUpdate, SubagentId};
 use parking_lot::RwLock;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
@@ -27,8 +25,8 @@ use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::num::Saturating;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, env, fmt, io};
 use tokio::sync::oneshot;
@@ -91,8 +89,8 @@ struct AgentState {
     /// The current general state of the agent’s client
     client_state: Arc<RwLock<ClientState>>,
 
-    /// The chat history as shared with the agent
-    history: Arc<Mutex<ChatHistory>>,
+    /// The chat history
+    history: ChatHistory,
 
     /// If a subagent: Additional information about it
     subagent_state: Option<SubagentState>,
@@ -100,8 +98,8 @@ struct AgentState {
     /// First line of the chat history to show (`usize::MAX` to follow the tail)
     scroll: Saturating<usize>,
 
-    /// How many lines (elements of `chat_history`) are visible on screen right now
-    lines_on_screen: usize,
+    /// How many logical lines (elements of `chat_history`) are visible on screen right now
+    logical_lines_on_screen: usize,
 }
 
 /// Additional information about subagents
@@ -113,10 +111,49 @@ struct SubagentState {
     task: String,
 }
 
+/// Chat history data
+#[derive(Debug, Default)]
+struct ChatHistory {
+    /// Full chat history
+    content: Vec<ChatBlock>,
+}
+
+/// A block in the chat with a single semantic
+#[derive(Debug)]
+enum ChatBlock {
+    /// A user prompt
+    User(ChatBlockContent),
+
+    /// Assistant reply (actual content)
+    Content(ChatBlockContent),
+
+    /// Reasoning output
+    Reasoning(ChatBlockContent),
+
+    /// A tool call
+    ToolCall(ChatBlockContent),
+
+    /// A tool call result (on success)
+    ToolResultOk(ChatBlockContent),
+
+    /// A tool call result (on error)
+    ToolResultErr(ChatBlockContent),
+}
+
+/// The content of a block in the chat with some semantic
+#[derive(Debug, Default)]
+struct ChatBlockContent {
+    /// The actual lines of content
+    lines: Vec<String>,
+
+    /// Trailing whitespace, tracked separately because we do not want to show it
+    trailing_whitespace: String,
+}
+
 impl TermUi {
-    /// Create the term state with `chat_history`, for `agent`, with the application name
-    /// `app_name` (e.g. for notifications).
-    pub fn new(app_name: &str, agent: &Agent, chat_history: Arc<Mutex<ChatHistory>>) -> Self {
+    /// Create the term state for `agent`, with the application name `app_name` (e.g. for
+    /// notifications).
+    pub fn new(app_name: &str, agent: &Agent) -> Self {
         let term = ratatui::init();
         set_up_term();
 
@@ -127,11 +164,7 @@ impl TermUi {
         TermUi {
             term: Some(term),
             events: ct::EventStream::new(),
-            agents: UiAgents::new(
-                agent.client_state_arc(),
-                agent.client_info().clone(),
-                chat_history,
-            ),
+            agents: UiAgents::new(agent.client_state_arc(), agent.client_info().clone()),
             input_area,
             queued_prompts: VecDeque::new(),
             processing: false,
@@ -155,10 +188,10 @@ impl TermUi {
     /// Scroll the active view up by the given number of lines.
     fn scroll_up(&mut self, lines: usize) {
         let agent = self.agents.active_mut();
-        let history_len = agent.history.lock().unwrap().lines().len();
+        let history_len = agent.history.logical_line_count();
 
         if agent.scroll.0 == usize::MAX {
-            agent.scroll.0 = history_len.saturating_sub(agent.lines_on_screen);
+            agent.scroll.0 = history_len.saturating_sub(agent.logical_lines_on_screen);
         }
         agent.scroll -= lines;
     }
@@ -166,10 +199,10 @@ impl TermUi {
     /// Scroll the active view down by the given number of lines.
     fn scroll_down(&mut self, lines: usize) {
         let agent = self.agents.active_mut();
-        let history_len = agent.history.lock().unwrap().lines().len();
+        let history_len = agent.history.logical_line_count();
 
         agent.scroll += lines;
-        if agent.scroll.0 >= history_len.saturating_sub(agent.lines_on_screen) {
+        if agent.scroll.0 >= history_len.saturating_sub(agent.logical_lines_on_screen) {
             agent.scroll.0 = usize::MAX;
         }
     }
@@ -222,7 +255,7 @@ impl TermUi {
                     if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
                         self.agents.switch_prev();
                     } else {
-                        self.scroll_up(self.agents.active().lines_on_screen.div_ceil(2));
+                        self.scroll_up(self.agents.active().logical_lines_on_screen.div_ceil(2));
                     }
                     return Ok(None);
                 }
@@ -230,7 +263,7 @@ impl TermUi {
                     if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
                         self.agents.switch_next();
                     } else {
-                        self.scroll_down(self.agents.active().lines_on_screen.div_ceil(2));
+                        self.scroll_down(self.agents.active().logical_lines_on_screen.div_ceil(2));
                     }
                     return Ok(None);
                 }
@@ -406,46 +439,14 @@ impl TermUi {
         };
 
         let agent = self.agents.active_mut();
-        let chat_history = agent.history.lock().unwrap();
         let history_line_count = history_cell.height.saturating_sub(2) as usize;
         let history_width = history_cell.width.saturating_sub(2) as usize;
 
-        let mut lines_on_screen = 0;
-
-        let history_lines = if agent.scroll.0 == usize::MAX {
-            let mut history_lines = history_into_ratatui_lines(
-                chat_history
-                    .lines()
-                    .iter()
-                    .rev()
-                    .flat_map(|line| {
-                        lines_on_screen += 1; // diabolical
-                        textwrap::wrap(&line.0, history_width)
-                            .into_iter()
-                            .rev()
-                            .map(|l| (l, line.1))
-                    })
-                    .take(history_line_count),
-            );
-            history_lines.reverse();
-            history_lines
-        } else {
-            history_into_ratatui_lines(
-                chat_history
-                    .lines()
-                    .iter()
-                    .skip(agent.scroll.0)
-                    .flat_map(|line| {
-                        lines_on_screen += 1; // diabolical
-                        textwrap::wrap(&line.0, history_width)
-                            .into_iter()
-                            .map(|l| (l, line.1))
-                    })
-                    .take(history_line_count),
-            )
-        };
-
-        agent.lines_on_screen = lines_on_screen;
+        let (history_lines, logical_lines_on_screen) =
+            agent
+                .history
+                .render(agent.scroll.0, history_width, history_line_count);
+        agent.logical_lines_on_screen = logical_lines_on_screen;
 
         let paragraph_content = Text {
             alignment: None,
@@ -462,8 +463,8 @@ impl TermUi {
         let paragraph = Paragraph::new(paragraph_content).block(chat_block);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        let history_len = chat_history.lines().len();
-        let scroll_len = history_len.saturating_sub(lines_on_screen);
+        let history_len = agent.history.logical_line_count();
+        let scroll_len = history_len.saturating_sub(agent.logical_lines_on_screen);
         let mut scrollbar_state =
             ScrollbarState::new(scroll_len).position(cmp::min(agent.scroll.0, scroll_len));
 
@@ -558,7 +559,17 @@ impl ui::UiState for TermUi {
         match notification {
             ui::Notification::Exit => (), // To be handled by the parent
             ui::Notification::Update => (),
-            ui::Notification::UpdateAgent { agent_id } => {
+            ui::Notification::AgentUpdate { agent_id, content } => {
+                if matches!(
+                    (agent_id, &content),
+                    (AgentId::Main, AgentUpdate::User { prompt: _ })
+                ) {
+                    self.queued_prompts.pop_front();
+                    self.processing = true;
+                }
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    agent.history.push(content);
+                }
                 // Skip the redraw if the updated agent is not the one on screen
                 if agent_id != self.agents.active_agent_id() {
                     return Ok(());
@@ -577,10 +588,6 @@ impl ui::UiState for TermUi {
                     .collect::<String>();
                 self.queued_prompts.push_back(sanitized);
             }
-            ui::Notification::PromptSubmitted => {
-                self.queued_prompts.pop_front();
-                self.processing = true;
-            }
             ui::Notification::AwaitingPrompt { response } => {
                 self.processing = false;
                 self.notify_prompt_done(response);
@@ -596,15 +603,9 @@ impl ui::UiState for TermUi {
                 prompt,
                 client_info,
                 client_state,
-                chat_history,
             } => {
-                self.agents.add_subagent(
-                    subagent_id,
-                    prompt,
-                    client_info,
-                    client_state,
-                    chat_history,
-                );
+                self.agents
+                    .add_subagent(subagent_id, prompt, client_info, client_state);
             }
             ui::Notification::SubagentDropped { subagent_id } => {
                 self.agents.remove_subagent(subagent_id);
@@ -645,54 +646,17 @@ fn tear_down_term() {
     }
 }
 
-/// Helper function to convert the given iterator of `HistoryEntryType`-annotated lines into
-/// ratatui lines.
-fn history_into_ratatui_lines<'a, I: Iterator<Item = (Cow<'a, str>, HistoryEntryType)>>(
-    iter: I,
-) -> Vec<Line<'a>> {
-    iter.map(|line| {
-        let (style, alignment) = ratatui_style(line.1);
-
-        Line {
-            style,
-            alignment: Some(alignment),
-            spans: vec![Span {
-                style: Default::default(),
-                content: line.0,
-            }],
-        }
-    })
-    .collect()
-}
-
-/// Converts a `HistoryEntryType` into the corresponding ratatui styles
-fn ratatui_style(het: HistoryEntryType) -> (Style, Alignment) {
-    match het {
-        HistoryEntryType::Empty => (Style::default(), Alignment::Left),
-        HistoryEntryType::User => (Style::default().bold().magenta(), Alignment::Right),
-        HistoryEntryType::Content => (Style::default().white(), Alignment::Left),
-        HistoryEntryType::Reasoning => (Style::default().dim(), Alignment::Left),
-        HistoryEntryType::ToolCall => (Style::default().blue(), Alignment::Left),
-        HistoryEntryType::ToolResultOk => (Style::default().green(), Alignment::Left),
-        HistoryEntryType::ToolResultErr => (Style::default().bold().red(), Alignment::Left),
-    }
-}
-
 impl UiAgents {
     /// Create a new collection of agents, with a single main agent
-    fn new(
-        main_client_state: Arc<RwLock<ClientState>>,
-        main_client_info: ClientInfo,
-        main_history: Arc<Mutex<ChatHistory>>,
-    ) -> Self {
+    fn new(main_client_state: Arc<RwLock<ClientState>>, main_client_info: ClientInfo) -> Self {
         UiAgents {
             state: vec![AgentState {
-                client_state: main_client_state,
                 client_info: main_client_info,
-                history: main_history,
+                client_state: main_client_state,
+                history: Default::default(),
                 subagent_state: None,
                 scroll: Saturating(usize::MAX),
-                lines_on_screen: 0,
+                logical_lines_on_screen: 0,
             }],
             active_agent: 0,
         }
@@ -705,18 +669,17 @@ impl UiAgents {
         prompt: String,
         client_info: ClientInfo,
         client_state: Arc<RwLock<ClientState>>,
-        history: Arc<Mutex<ChatHistory>>,
     ) {
         self.state.push(AgentState {
             client_info,
             client_state,
-            history,
+            history: Default::default(),
             subagent_state: Some(SubagentState {
                 id: subagent_id,
                 task: prompt,
             }),
             scroll: Saturating(usize::MAX),
-            lines_on_screen: 0,
+            logical_lines_on_screen: 0,
         });
     }
 
@@ -748,7 +711,9 @@ impl UiAgents {
 
     /// Return the currently active view’s agent, mutably
     fn active_mut(&mut self) -> &mut AgentState {
-        self.state.get_mut(self.active_agent).expect("No agents left")
+        self.state
+            .get_mut(self.active_agent)
+            .expect("No agents left")
     }
 
     /// Return whether the currently active view is the main agent’s
@@ -800,6 +765,17 @@ impl UiAgents {
         self.active_agent = self.active_agent.checked_add(1).unwrap_or(0);
         if self.active_agent >= self.state.len() {
             self.active_agent = 0;
+        }
+    }
+
+    /// Return a mutable reference to the agent with `agent_id`, if any
+    fn get_mut(&mut self, agent_id: &AgentId) -> Option<&mut AgentState> {
+        match agent_id {
+            AgentId::Main => self.state.get_mut(0),
+            AgentId::Subagent(id) => self
+                .state
+                .iter_mut()
+                .find(|agent| agent.subagent_state.as_ref().is_some_and(|s| s.id == *id)),
         }
     }
 }
@@ -896,10 +872,270 @@ impl fmt::Display for AgentStatsDisplay<'_> {
     }
 }
 
+impl ChatHistory {
+    /// Push the given update into the history.
+    fn push(&mut self, update: AgentUpdate) {
+        match update {
+            AgentUpdate::User { prompt } => {
+                self.content.push(ChatBlock::User(prompt.into()));
+            }
+
+            AgentUpdate::Content { append } => {
+                if let Some(last) = self.content.last_mut()
+                    && let ChatBlock::Content(block) = last
+                {
+                    block.append(&append);
+                } else {
+                    self.content.push(ChatBlock::Content(append.into()));
+                }
+            }
+
+            AgentUpdate::Reasoning { append } => {
+                if let Some(last) = self.content.last_mut()
+                    && let ChatBlock::Reasoning(block) = last
+                {
+                    block.append(&append);
+                } else {
+                    self.content.push(ChatBlock::Reasoning(append.into()));
+                }
+            }
+
+            AgentUpdate::ToolCallEx { call, display } => {
+                self.content.push(ChatBlock::ToolCall(
+                    format!("[{}] {display}", call.id).into(),
+                ));
+            }
+
+            AgentUpdate::ToolResultEx { call, display } => {
+                let name = call.call.name();
+                let line = match &display {
+                    Ok(display) => format!("=[{name}/{}]=> {display}", call.id),
+                    Err(err) => format!("=[{name}/{}]=> {err}", call.id),
+                };
+                let block = match display {
+                    Ok(_) => ChatBlock::ToolResultOk(line.into()),
+                    Err(_) => ChatBlock::ToolResultErr(line.into()),
+                };
+                self.content.push(block);
+            }
+        }
+    }
+
+    /// Return the number of logical lines of the whole chat history.
+    ///
+    /// This does not take into account wrapping because of the screen width, but assumes infinite
+    /// width.
+    fn logical_line_count(&self) -> usize {
+        self.content.iter().map(|b| b.logical_line_count()).sum()
+    }
+
+    /// Render the history pane.
+    ///
+    /// `scroll` is the number of logical (unwrapped) lines to skip, or `usize::MAX` to show the
+    /// tail of the history. The returned `Vec<Line>` has exactly `height` elements (padded with
+    /// empty lines if the history is shorter).
+    ///
+    /// Also counts and returns the number of logical lines that contribute to the window, for use
+    /// in scroll calculations.
+    fn render(&self, scroll: usize, width: usize, height: usize) -> (Vec<Line<'static>>, usize) {
+        let (mut lines, logical_lines_on_screen) = if scroll == usize::MAX {
+            self.render_tail(width, height)
+        } else {
+            self.render_from_top(scroll, width, height)
+        };
+
+        lines.resize(height, Line::default());
+        (lines, logical_lines_on_screen)
+    }
+
+    /// Render the tail of the history.
+    ///
+    /// Helper function for [`Self::render()`].
+    fn render_tail(&self, width: usize, height: usize) -> (Vec<Line<'static>>, usize) {
+        // Walk the logical lines backwards, wrapping as we go, until the window is full.
+        let mut lines = Vec::new();
+        let mut logical_lines_on_screen = 0;
+
+        'outer: for block in self.content.iter().rev() {
+            for logical in block.lines().iter().rev() {
+                if lines.len() >= height {
+                    break 'outer;
+                }
+
+                logical_lines_on_screen += 1;
+                for line in block.render_line(logical, width).into_iter().rev() {
+                    lines.push(line);
+                    if lines.len() >= height {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        lines.reverse();
+        (lines, logical_lines_on_screen)
+    }
+
+    /// Render a middle element of the history, offset given by logical lines within.
+    ///
+    /// Helper function for [`Self::render()`].
+    fn render_from_top(
+        &self,
+        scroll: usize,
+        width: usize,
+        height: usize,
+    ) -> (Vec<Line<'static>>, usize) {
+        // Show the window starting `scroll` logical lines in: skip that many lines without
+        // wrapping, then wrap until the window is full.
+        let mut to_skip = scroll;
+        let mut lines = Vec::new();
+        let mut logical_lines_on_screen = 0;
+
+        'outer: for block in self.content.iter() {
+            for logical in block.lines().iter() {
+                if to_skip > 0 {
+                    to_skip -= 1;
+                    continue;
+                }
+                if lines.len() >= height {
+                    break 'outer;
+                }
+
+                logical_lines_on_screen += 1;
+                for line in block.render_line(logical, width) {
+                    lines.push(line);
+                    if lines.len() >= height {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        (lines, logical_lines_on_screen)
+    }
+}
+
+impl ChatBlock {
+    /// Return the number of logical lines of this block.
+    ///
+    /// This does not take into account wrapping because of the screen width, but assumes infinite
+    /// width.
+    fn logical_line_count(&self) -> usize {
+        match self {
+            ChatBlock::User(b)
+            | ChatBlock::Content(b)
+            | ChatBlock::Reasoning(b)
+            | ChatBlock::ToolCall(b)
+            | ChatBlock::ToolResultOk(b)
+            | ChatBlock::ToolResultErr(b) => b.lines.len(),
+        }
+    }
+
+    /// Return the logical (unwrapped) lines of this block.
+    fn lines(&self) -> &[String] {
+        match self {
+            ChatBlock::User(b)
+            | ChatBlock::Content(b)
+            | ChatBlock::Reasoning(b)
+            | ChatBlock::ToolCall(b)
+            | ChatBlock::ToolResultOk(b)
+            | ChatBlock::ToolResultErr(b) => &b.lines,
+        }
+    }
+
+    /// Wrap the given logical line at `line_width` and return the styled
+    /// display lines for it.
+    fn render_line(&self, line: &str, line_width: usize) -> Vec<Line<'static>> {
+        let (style, alignment) = self.style_alignment();
+
+        textwrap::wrap(line, line_width)
+            .into_iter()
+            .map(|line| Line {
+                style,
+                alignment,
+                spans: vec![Span {
+                    style: Default::default(),
+                    content: line.into_owned().into(),
+                }],
+            })
+            .collect()
+    }
+
+    /// Return the style and alignment of this block’s lines.
+    fn style_alignment(&self) -> (Style, Option<Alignment>) {
+        match self {
+            ChatBlock::User(_) => (Style::default().bold().magenta(), Some(Alignment::Right)),
+            ChatBlock::Content(_) => (Style::default().white(), None),
+            ChatBlock::Reasoning(_) => (Style::default().dim(), None),
+            ChatBlock::ToolCall(_) => (Style::default().blue(), None),
+            ChatBlock::ToolResultOk(_) => (Style::default().green(), None),
+            ChatBlock::ToolResultErr(_) => (Style::default().bold().red(), None),
+        }
+    }
+}
+
+impl ChatBlockContent {
+    /// Append `string` to this block
+    fn append(&mut self, string: &str) {
+        let full_string = format!("{}{string}", self.trailing_whitespace);
+        let (iter, trailing_ws) = Self::split_up(&full_string);
+
+        if let Some(mut iter) = iter {
+            if let Some(last) = self.lines.last_mut() {
+                last.push_str(iter.next().expect("split_up() returned an empty iterator"));
+            }
+            self.lines.extend(iter.map(String::from));
+        }
+        self.trailing_whitespace = trailing_ws.to_string();
+    }
+
+    /// Internal helper: Split up string by lines, and return trailing whitespace
+    fn split_up(string: &str) -> (Option<impl Iterator<Item = &str>>, &str) {
+        let non_ws = string.trim_end();
+        let ws = &string[non_ws.len()..];
+
+        if non_ws.is_empty() {
+            (None, ws)
+        } else {
+            let iterator = non_ws
+                .split('\n')
+                .map(|l| l.strip_suffix('\r').unwrap_or(l));
+
+            (Some(iterator), ws)
+        }
+    }
+}
+
+impl From<&str> for ChatBlockContent {
+    /// Use `string` as a whole as block content
+    fn from(string: &str) -> Self {
+        let (iter, trailing_ws) = Self::split_up(string);
+        let lines = if let Some(iter) = iter {
+            iter.map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+        ChatBlockContent {
+            lines,
+            trailing_whitespace: trailing_ws.to_string(),
+        }
+    }
+}
+
+impl From<String> for ChatBlockContent {
+    /// Use `string` as a whole as block content
+    fn from(string: String) -> Self {
+        (&string as &str).into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llimorse::client::TokenUsage;
+    use llimorse::line_format::{FunctionCall, ToolCall, ToolCallParams};
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
 
     /// Draw a busy background and the permission popup for the given prompt, and return the
     /// resulting screen as lines of symbols.
@@ -924,8 +1160,8 @@ mod tests {
     #[test]
     fn popup_is_centered_and_opaque() {
         // 60x20 terminal: the popup is 48 wide (80%) and 5 tall (one prompt line plus thick border
-        // and proportional padding), at (6, 8) (the layout solver gives the leftover row to the top
-        // when centering).
+        // and proportional padding), at (6, 8) (the layout solver gives the leftover row to the
+        // top when centering).
         let title = " Tool permission requested ";
         let hint = " [Enter: allow]  [Esc: deny] ";
         let mut expected = vec!["x".repeat(60); 20];
@@ -956,6 +1192,121 @@ mod tests {
         assert_eq!(screen_with_popup(60, 20, "echo hello"), expected);
     }
 
+    /// Render the first (only) line of `block` and return its text and style.
+    fn first_rendered_line(block: &ChatBlock, width: usize) -> (String, Style) {
+        let line = block
+            .render_line(&block.lines()[0], width)
+            .into_iter()
+            .next()
+            .expect("block renders at least one line");
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        (text, line.style)
+    }
+
+    /// Build a single content block with one logical line per entry.
+    fn content_history(lines: &[&str]) -> ChatHistory {
+        let mut history = ChatHistory::default();
+        for line in lines {
+            history.push(AgentUpdate::Content {
+                append: format!("{line}\n"),
+            });
+        }
+        history
+    }
+
+    /// Return the texts of the given rendered lines.
+    fn line_texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pane_shows_the_tail_with_wrapping() {
+        // At width 5, "bbbbbbbb" wraps to two lines, so the history has four display lines for
+        // three logical lines.
+        let history = content_history(&["aaaaa", "bbbbbbbb", "cc"]);
+
+        let (lines, logical_lines_on_screen) = history.render(usize::MAX, 5, 3);
+        assert_eq!(line_texts(&lines), vec!["bbbbb", "bbb", "cc"]);
+        // The window is filled by the last two logical lines.
+        assert_eq!(logical_lines_on_screen, 2);
+    }
+
+    #[test]
+    fn pane_skips_logical_not_display_lines() {
+        // At width 5, "xxxx x" wraps to two display lines. Skipping one *logical* line must start
+        // the window at "yyyy", not at the second display line of the first.
+        let history = content_history(&["xxxx x", "yyyy"]);
+
+        let (lines, logical_lines_on_screen) = history.render(1, 5, 2);
+        assert_eq!(line_texts(&lines), vec!["yyyy", ""]);
+        assert_eq!(logical_lines_on_screen, 1);
+    }
+
+    #[test]
+    fn pane_pads_short_histories_and_counts_visited_lines() {
+        // The empty logical line renders as an empty display line, and is counted when the tail
+        // walk visits it.
+        let history = content_history(&["a", "", "b"]);
+
+        let (lines, logical_lines_on_screen) = history.render(usize::MAX, 10, 5);
+        assert_eq!(line_texts(&lines), vec!["a", "", "b", "", ""]);
+        assert_eq!(logical_lines_on_screen, 3);
+    }
+
+    #[test]
+    fn tool_calls_and_results_render_with_their_display_format() {
+        let call = ToolCall {
+            id: "call_1".into(),
+            call: ToolCallParams::Function {
+                function: FunctionCall {
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+            },
+        };
+
+        let mut history = ChatHistory::default();
+        history.push(AgentUpdate::ToolCallEx {
+            call: call.clone(),
+            display: "bash: echo hi".into(),
+        });
+        history.push(AgentUpdate::ToolResultEx {
+            call: call.clone(),
+            display: Ok("hi".into()),
+        });
+        history.push(AgentUpdate::ToolResultEx {
+            call,
+            display: Err("command not found".into()),
+        });
+
+        assert_eq!(history.logical_line_count(), 3);
+
+        let (text, style) = first_rendered_line(&history.content[0], 80);
+        assert_eq!(text, "[call_1] bash: echo hi");
+        assert_eq!(style.fg, Some(Color::Blue));
+
+        let (text, style) = first_rendered_line(&history.content[1], 80);
+        assert_eq!(text, "=[bash/call_1]=> hi");
+        assert_eq!(style.fg, Some(Color::Green));
+
+        let (text, style) = first_rendered_line(&history.content[2], 80);
+        assert_eq!(text, "=[bash/call_1]=> command not found");
+        assert_eq!(style.fg, Some(Color::Red));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
     #[test]
     fn popup_does_not_panic_on_small_terminals() {
         // A prompt that would be far too large for the terminal must be clamped, not panic.
@@ -968,5 +1319,63 @@ mod tests {
         let screen = screen_with_popup(12, 6, &prompt);
         assert!(screen[0].contains('┏') && screen[0].contains('┓'));
         assert!(screen[5].contains('┗') && screen[5].contains('┛'));
+    }
+
+    /// Subagent IDs come from a monotonically increasing counter, while the state list is
+    /// compacted when a subagent is dropped. Updates for surviving subagents must therefore be
+    /// routed by their stored ID, not by index arithmetic.
+    #[test]
+    fn subagent_updates_survive_the_drop_of_another_subagent() {
+        let client_state = || {
+            Arc::new(RwLock::new(ClientState {
+                token_usage: TokenUsage::default(),
+                operation_stage: AgentStage::default(),
+            }))
+        };
+        let client_info = || ClientInfo {
+            model_name: "test".into(),
+            context_size: None,
+        };
+
+        let mut agents = UiAgents::new(client_state(), client_info());
+        agents.add_subagent(
+            SubagentId::new(0),
+            "first".into(),
+            client_info(),
+            client_state(),
+        );
+        agents.add_subagent(
+            SubagentId::new(1),
+            "second".into(),
+            client_info(),
+            client_state(),
+        );
+
+        // The first subagent finishes and is compacted out of the list.
+        agents.remove_subagent(SubagentId::new(0));
+        assert_eq!(agents.state.len(), 2);
+
+        // The surviving subagent must still be routable, and the update must land in its history,
+        // not be swallowed.
+        let Some(agent) = agents.get_mut(&AgentId::Subagent(SubagentId::new(1))) else {
+            panic!("surviving subagent was not found after compaction");
+        };
+        agent.history.push(AgentUpdate::Content {
+            append: "hello".into(),
+        });
+
+        assert!(agents.state[0].history.content.is_empty());
+        assert_eq!(
+            agents.state[1].subagent_state.as_ref().unwrap().id,
+            SubagentId::new(1)
+        );
+        assert!(!agents.state[1].history.content.is_empty());
+
+        // A dropped subagent must not be routable.
+        assert!(
+            agents
+                .get_mut(&AgentId::Subagent(SubagentId::new(0)))
+                .is_none()
+        );
     }
 }
