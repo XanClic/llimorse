@@ -73,7 +73,7 @@ llimorse::tool! {
         /// llama-server base URL (e.g. "http://127.0.0.1:8080").
         llama_url: String,
 
-        /// Model name to use (from the parent's [`ClientState`]).
+        /// Model name to use (from the parent's [`ClientState`](llimorse::client::ClientState)).
         model_name: String,
 
         /// Factory producing the tool set for each subagent.

@@ -127,16 +127,16 @@ pub enum Notification {
     },
 }
 
-/// A handle to the UI-notification channel, which can be created before [`App`].
+/// A handle to the UI-notification channel, which can be created before [`App`](crate::App).
 ///
 /// The sender side is cloneable, so it can be shared with objects that are created before the
-/// application, such as [`UserToolGate`]. [`App::new()`] consumes this object, taking the
-/// receiver side into itself.
+/// application, such as [`UserToolGate`](crate::tools::UserToolGate).
+/// [`App::new()`](crate::App::new()) consumes this object, taking the receiver side into itself.
 pub struct NotificationChannel {
     /// The sender side (cloneable)
     sender: mpsc::UnboundedSender<Notification>,
 
-    /// The receiver side (consumed by [`App`])
+    /// The receiver side (consumed by [`App`](crate::App))
     receiver: mpsc::UnboundedReceiver<Notification>,
 }
 
@@ -158,7 +158,7 @@ impl NotificationChannel {
         self.sender.clone()
     }
 
-    /// For [`App::new()`]: Consume and get the receiving end
+    /// For [`App::new()`](crate::App::new()): Consume and get the receiving end
     pub(crate) fn into_receiver(self) -> mpsc::UnboundedReceiver<Notification> {
         self.receiver
     }
