@@ -743,19 +743,12 @@ impl UiAgents {
 
     /// Return the currently active view’s agent
     fn active(&self) -> &AgentState {
-        self.state
-            .get(self.active_agent)
-            .or_else(|| self.state.first())
-            .expect("No agents left")
+        self.state.get(self.active_agent).expect("No agents left")
     }
 
     /// Return the currently active view’s agent, mutably
     fn active_mut(&mut self) -> &mut AgentState {
-        if let Some(state) = self.state.get_mut(self.active_agent) {
-            state
-        } else {
-            self.state.first_mut().expect("No agents left")
-        }
+        self.state.get_mut(self.active_agent).expect("No agents left")
     }
 
     /// Return whether the currently active view is the main agent’s
