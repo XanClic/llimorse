@@ -24,11 +24,11 @@ use ratatui::widgets::{
 use ratatui::{DefaultTerminal, Frame};
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::num::Saturating;
+use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use std::{cmp, env, fmt, io};
+use std::{env, fmt, io};
 use tokio::sync::oneshot;
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
@@ -94,12 +94,6 @@ struct AgentState {
 
     /// If a subagent: Additional information about it
     subagent_state: Option<SubagentState>,
-
-    /// First line of the chat history to show (`usize::MAX` to follow the tail)
-    scroll: Saturating<usize>,
-
-    /// How many logical lines (elements of `chat_history`) are visible on screen right now
-    logical_lines_on_screen: usize,
 }
 
 /// Additional information about subagents
@@ -111,12 +105,166 @@ struct SubagentState {
     task: String,
 }
 
-/// Chat history data
+/// The scroll position of an agent’s view
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollPosition {
+    /// Follow the tail of the history
+    Follow,
+
+    /// The character at the given logical line and column starts the top row
+    /// of the view
+    Anchor {
+        /// The index of the logical (unwrapped) line
+        line: usize,
+
+        /// The offset of the character within that line
+        col: usize,
+    },
+}
+
+/// The wrapped-line counts of a chat history, cached for a width
 #[derive(Debug, Default)]
+struct WrappedCache {
+    /// The width the counts were computed for
+    width: usize,
+
+    /// The number of wrapped lines each logical line produces
+    line_lengths: Vec<usize>,
+
+    /// The total number of wrapped lines
+    total: usize,
+}
+
+impl WrappedCache {
+    /// (Re)compute the wrapped-line counts of `history` for `width`, reusing the previous counts
+    /// where the lines have not changed.
+    ///
+    /// The history is append-only, and only its last logical line can change content (streaming),
+    /// so only the last existing line and any new lines need to be (re)wrapped.
+    fn update(&mut self, history: &ChatHistoryContent, width: usize) {
+        if self.width != width {
+            self.width = width;
+            self.line_lengths = history
+                .logical_lines()
+                .map(|line| textwrap::wrap(line, width).len())
+                .collect();
+            self.total = self.line_lengths.iter().sum();
+            return;
+        }
+
+        let count = history.logical_line_count();
+        if count == 0 {
+            self.line_lengths.clear();
+            self.total = 0;
+            return;
+        }
+
+        if count < self.line_lengths.len() {
+            // The history shrank, which cannot happen; drop the stale counts
+            self.line_lengths.truncate(count);
+        }
+
+        // The last line may have grown (a streaming chunk)
+        let last = count - 1;
+        if last < self.line_lengths.len() {
+            let line = history.logical_line(last).expect("line exists");
+            self.line_lengths[last] = textwrap::wrap(line, width).len();
+        }
+
+        for i in self.line_lengths.len()..count {
+            let line = history.logical_line(i).expect("line exists");
+            self.line_lengths.push(textwrap::wrap(line, width).len());
+        }
+
+        self.total = self.line_lengths.iter().sum();
+    }
+
+    /// Return the index of the wrapped line that contains the character at the given logical
+    /// `line` and `col`.
+    fn row_of(&self, history: &ChatHistoryContent, line: usize, col: usize) -> usize {
+        let line = line.min(self.line_lengths.len().saturating_sub(1));
+
+        let mut row = 0;
+        for &len in &self.line_lengths[..line] {
+            row += len;
+        }
+
+        let logical = history.logical_line(line).expect("line exists");
+        let starts = fragment_starts(logical, &textwrap::wrap(logical, self.width));
+        let frag = starts.iter().rposition(|&start| start <= col).unwrap_or(0);
+        row + frag
+    }
+
+    /// Return the scroll position that puts the top row of the view at wrapped line `row`.
+    fn anchor_at_row(&self, history: &ChatHistoryContent, row: usize) -> ScrollPosition {
+        if self.total == 0 {
+            return ScrollPosition::Follow;
+        }
+
+        let row = row.min(self.total - 1);
+        let mut acc = 0;
+        for (line, &len) in self.line_lengths.iter().enumerate() {
+            if row < acc + len {
+                let logical = history.logical_line(line).expect("line exists");
+                let starts = fragment_starts(logical, &textwrap::wrap(logical, self.width));
+                let col = starts[row - acc];
+                return ScrollPosition::Anchor { line, col };
+            }
+            acc += len;
+        }
+
+        // Unreachable: row < total
+        ScrollPosition::Follow
+    }
+}
+
+/// Return the offset of each wrapped fragment within the original line.
+///
+/// `fragments` is the output of `textwrap::wrap(line, width)`. The fragments
+/// are in order and separated by the whitespace textwrap dropped at the wrap
+/// points, so the offsets are recovered by walking the line.
+fn fragment_starts(line: &str, fragments: &[Cow<'_, str>]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(fragments.len());
+    let mut pos = 0;
+
+    for fragment in fragments {
+        while pos < line.len() {
+            let c = line[pos..].chars().next().unwrap();
+            if c.is_whitespace() {
+                pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        starts.push(pos);
+        pos += fragment.len();
+    }
+
+    starts
+}
+
+/// Chat history data, and view
+#[derive(Debug)]
 struct ChatHistory {
     /// Full chat history
-    content: Vec<ChatBlock>,
+    content: ChatHistoryContent,
+
+    /// The scroll position of the view
+    scroll: ScrollPosition,
+
+    /// The width in terminal character blocks (from this or the last render)
+    pane_width: NonZero<usize>,
+
+    /// The number of rows the history pane (from this or the last render)
+    pane_height: NonZero<usize>,
+
+    /// The wrapped-line counts of the history, for the last render’s width
+    cache: WrappedCache,
 }
+
+/// Chat history data
+#[derive(Debug, Default)]
+struct ChatHistoryContent(Vec<ChatBlock>);
 
 /// A block in the chat with a single semantic
 #[derive(Debug)]
@@ -185,26 +333,14 @@ impl TermUi {
         Ok(())
     }
 
-    /// Scroll the active view up by the given number of lines.
+    /// Scroll the active view up by the given number of screen rows.
     fn scroll_up(&mut self, lines: usize) {
-        let agent = self.agents.active_mut();
-        let history_len = agent.history.logical_line_count();
-
-        if agent.scroll.0 == usize::MAX {
-            agent.scroll.0 = history_len.saturating_sub(agent.logical_lines_on_screen);
-        }
-        agent.scroll -= lines;
+        self.agents.active_mut().history.scroll_up(lines);
     }
 
-    /// Scroll the active view down by the given number of lines.
+    /// Scroll the active view down by the given number of screen rows.
     fn scroll_down(&mut self, lines: usize) {
-        let agent = self.agents.active_mut();
-        let history_len = agent.history.logical_line_count();
-
-        agent.scroll += lines;
-        if agent.scroll.0 >= history_len.saturating_sub(agent.logical_lines_on_screen) {
-            agent.scroll.0 = usize::MAX;
-        }
+        self.agents.active_mut().history.scroll_down(lines);
     }
 
     /// Handle the given keyboard event.
@@ -255,7 +391,8 @@ impl TermUi {
                     if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
                         self.agents.switch_prev();
                     } else {
-                        self.scroll_up(self.agents.active().logical_lines_on_screen.div_ceil(2));
+                        let pane_height = self.agents.active().history.pane_height.get();
+                        self.scroll_up(pane_height.div_ceil(2));
                     }
                     return Ok(None);
                 }
@@ -263,7 +400,8 @@ impl TermUi {
                     if event.modifiers.contains(ct::KeyModifiers::SHIFT) {
                         self.agents.switch_next();
                     } else {
-                        self.scroll_down(self.agents.active().logical_lines_on_screen.div_ceil(2));
+                        let pane_height = self.agents.active().history.pane_height.get();
+                        self.scroll_down(pane_height.div_ceil(2));
                     }
                     return Ok(None);
                 }
@@ -439,14 +577,13 @@ impl TermUi {
         };
 
         let agent = self.agents.active_mut();
-        let history_line_count = history_cell.height.saturating_sub(2) as usize;
-        let history_width = history_cell.width.saturating_sub(2) as usize;
 
-        let (history_lines, logical_lines_on_screen) =
-            agent
-                .history
-                .render(agent.scroll.0, history_width, history_line_count);
-        agent.logical_lines_on_screen = logical_lines_on_screen;
+        // Account for the border
+        agent.history.set_layout(
+            history_cell.width.saturating_sub(2) as usize,
+            history_cell.height.saturating_sub(2) as usize,
+        );
+        let history_lines = agent.history.render();
 
         let paragraph_content = Text {
             alignment: None,
@@ -463,10 +600,7 @@ impl TermUi {
         let paragraph = Paragraph::new(paragraph_content).block(chat_block);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        let history_len = agent.history.logical_line_count();
-        let scroll_len = history_len.saturating_sub(agent.logical_lines_on_screen);
-        let mut scrollbar_state =
-            ScrollbarState::new(scroll_len).position(cmp::min(agent.scroll.0, scroll_len));
+        let mut scrollbar_state = agent.history.scrollbar_state();
 
         frame.render_widget(paragraph, history_cell);
         frame.render_stateful_widget(
@@ -653,10 +787,8 @@ impl UiAgents {
             state: vec![AgentState {
                 client_info: main_client_info,
                 client_state: main_client_state,
-                history: Default::default(),
+                history: ChatHistory::new(),
                 subagent_state: None,
-                scroll: Saturating(usize::MAX),
-                logical_lines_on_screen: 0,
             }],
             active_agent: 0,
         }
@@ -673,13 +805,11 @@ impl UiAgents {
         self.state.push(AgentState {
             client_info,
             client_state,
-            history: Default::default(),
+            history: ChatHistory::new(),
             subagent_state: Some(SubagentState {
                 id: subagent_id,
                 task: prompt,
             }),
-            scroll: Saturating(usize::MAX),
-            logical_lines_on_screen: 0,
         });
     }
 
@@ -873,35 +1003,171 @@ impl fmt::Display for AgentStatsDisplay<'_> {
 }
 
 impl ChatHistory {
+    /// Create an empty chat history.
+    fn new() -> Self {
+        ChatHistory {
+            content: ChatHistoryContent::default(),
+            scroll: ScrollPosition::Follow,
+            pane_width: NonZero::new(usize::MAX).unwrap(),
+            pane_height: NonZero::new(usize::MAX).unwrap(),
+            cache: WrappedCache::default(),
+        }
+    }
+
+    /// Push the given update into the history.
+    fn push(&mut self, update: AgentUpdate) {
+        self.content.push(update);
+    }
+
+    /// Set the history pane width and height (in characters).
+    fn set_layout(&mut self, pane_width: usize, pane_height: usize) {
+        if pane_width == 0 || pane_height == 0 {
+            // Nothing is visible anyway, might as well go unlimited
+            self.pane_width = NonZero::new(usize::MAX).unwrap();
+            self.pane_height = NonZero::new(usize::MAX).unwrap();
+        } else {
+            // Checked to be non-zero
+            self.pane_width = NonZero::new(pane_width).unwrap();
+            self.pane_height = NonZero::new(pane_height).unwrap();
+        }
+
+        self.cache.update(&self.content, self.pane_width.get());
+    }
+
+    /// After rendering: Create a scrollbar state for this pane.
+    fn scrollbar_state(&self) -> ScrollbarState {
+        let scrollable = self.cache.total.saturating_sub(self.pane_height.get());
+        let scroll_position = match &self.scroll {
+            ScrollPosition::Follow => scrollable,
+            ScrollPosition::Anchor { .. } => self.first_row().min(scrollable),
+        };
+
+        ScrollbarState::new(scrollable).position(scroll_position)
+    }
+
+    /// Render the history pane.
+    fn render(&mut self) -> Vec<Line<'static>> {
+        let (width, height) = (self.pane_width.get(), self.pane_height.get());
+
+        self.cache.update(&self.content, width);
+
+        let total = self.cache.total;
+        let first = match self.scroll {
+            ScrollPosition::Follow => total.saturating_sub(height),
+            ScrollPosition::Anchor { line, col } => self.row_of(line, col),
+        }
+        .min(total);
+        let visible = total.saturating_sub(first).min(height);
+
+        let mut lines = Vec::with_capacity(visible);
+        let mut row = 0; // wrapped-line index of the next logical line
+        let mut line_idx = 0;
+        for block in self.content.blocks() {
+            for logical in block.lines() {
+                let line_len = *self.cache.line_lengths.get(line_idx).unwrap_or(&0);
+                if row + line_len <= first {
+                    row += line_len;
+                    line_idx += 1;
+                    continue; // the whole line is above the view
+                }
+                if row >= first + visible {
+                    break; // the view is full
+                }
+
+                let from = first.saturating_sub(row);
+                let to = (first + visible - row).min(line_len);
+                for fragment in textwrap::wrap(logical, width)
+                    .into_iter()
+                    .skip(from)
+                    .take(to - from)
+                {
+                    lines.push(block.style_fragment(fragment.into_owned()));
+                }
+                row += line_len;
+                line_idx += 1;
+            }
+        }
+
+        lines.resize(height, Line::default());
+        lines
+    }
+
+    /// Return the wrapped line that starts the current view.
+    fn first_row(&self) -> usize {
+        match self.scroll {
+            ScrollPosition::Follow => self.cache.total.saturating_sub(self.pane_height.get()),
+            ScrollPosition::Anchor { line, col } => self.row_of(line, col),
+        }
+    }
+
+    /// Return the index of the wrapped line that contains the character at the given logical
+    /// `line` and `col`.
+    fn row_of(&self, line: usize, col: usize) -> usize {
+        self.cache.row_of(&self.content, line, col)
+    }
+
+    /// Scroll the history in the pane up by the given number of screen rows.
+    fn scroll_up(&mut self, lines: usize) {
+        if self.cache.total == 0 {
+            return;
+        }
+
+        let first = self.first_row();
+        let new_first = first.saturating_sub(lines);
+        self.scroll = self.anchor_at_row(new_first);
+    }
+
+    /// Scroll the history in the pane down by the given number of screen rows.
+    fn scroll_down(&mut self, lines: usize) {
+        if self.cache.total == 0 {
+            return;
+        }
+
+        let first = self.first_row();
+        let new_first = first + lines;
+        if new_first + self.pane_height.get() >= self.cache.total {
+            self.scroll = ScrollPosition::Follow;
+        } else {
+            self.scroll = self.anchor_at_row(new_first);
+        }
+    }
+
+    /// Return the scroll position that puts the top row of the view at wrapped line `row`.
+    fn anchor_at_row(&self, row: usize) -> ScrollPosition {
+        self.cache.anchor_at_row(&self.content, row)
+    }
+}
+
+impl ChatHistoryContent {
     /// Push the given update into the history.
     fn push(&mut self, update: AgentUpdate) {
         match update {
             AgentUpdate::User { prompt } => {
-                self.content.push(ChatBlock::User(prompt.into()));
+                self.0.push(ChatBlock::User(prompt.into()));
             }
 
             AgentUpdate::Content { append } => {
-                if let Some(last) = self.content.last_mut()
+                if let Some(last) = self.0.last_mut()
                     && let ChatBlock::Content(block) = last
                 {
                     block.append(&append);
                 } else {
-                    self.content.push(ChatBlock::Content(append.into()));
+                    self.0.push(ChatBlock::Content(append.into()));
                 }
             }
 
             AgentUpdate::Reasoning { append } => {
-                if let Some(last) = self.content.last_mut()
+                if let Some(last) = self.0.last_mut()
                     && let ChatBlock::Reasoning(block) = last
                 {
                     block.append(&append);
                 } else {
-                    self.content.push(ChatBlock::Reasoning(append.into()));
+                    self.0.push(ChatBlock::Reasoning(append.into()));
                 }
             }
 
             AgentUpdate::ToolCallEx { call, display } => {
-                self.content.push(ChatBlock::ToolCall(
+                self.0.push(ChatBlock::ToolCall(
                     format!("[{}] {display}", call.id).into(),
                 ));
             }
@@ -916,121 +1182,43 @@ impl ChatHistory {
                     Ok(_) => ChatBlock::ToolResultOk(line.into()),
                     Err(_) => ChatBlock::ToolResultErr(line.into()),
                 };
-                self.content.push(block);
+                self.0.push(block);
             }
         }
     }
 
-    /// Return the number of logical lines of the whole chat history.
-    ///
-    /// This does not take into account wrapping because of the screen width, but assumes infinite
-    /// width.
+    /// Return all the logical (unwrapped) lines of the history, in order.
+    fn logical_lines(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .flat_map(|block| block.lines().iter().map(String::as_str))
+    }
+
+    /// Return the number of logical (unwrapped) lines in the history.
     fn logical_line_count(&self) -> usize {
-        self.content.iter().map(|b| b.logical_line_count()).sum()
+        self.0.iter().map(|block| block.lines().len()).sum()
     }
 
-    /// Render the history pane.
-    ///
-    /// `scroll` is the number of logical (unwrapped) lines to skip, or `usize::MAX` to show the
-    /// tail of the history. The returned `Vec<Line>` has exactly `height` elements (padded with
-    /// empty lines if the history is shorter).
-    ///
-    /// Also counts and returns the number of logical lines that contribute to the window, for use
-    /// in scroll calculations.
-    fn render(&self, scroll: usize, width: usize, height: usize) -> (Vec<Line<'static>>, usize) {
-        let (mut lines, logical_lines_on_screen) = if scroll == usize::MAX {
-            self.render_tail(width, height)
-        } else {
-            self.render_from_top(scroll, width, height)
-        };
-
-        lines.resize(height, Line::default());
-        (lines, logical_lines_on_screen)
-    }
-
-    /// Render the tail of the history.
-    ///
-    /// Helper function for [`Self::render()`].
-    fn render_tail(&self, width: usize, height: usize) -> (Vec<Line<'static>>, usize) {
-        // Walk the logical lines backwards, wrapping as we go, until the window is full.
-        let mut lines = Vec::new();
-        let mut logical_lines_on_screen = 0;
-
-        'outer: for block in self.content.iter().rev() {
-            for logical in block.lines().iter().rev() {
-                if lines.len() >= height {
-                    break 'outer;
-                }
-
-                logical_lines_on_screen += 1;
-                for line in block.render_line(logical, width).into_iter().rev() {
-                    lines.push(line);
-                    if lines.len() >= height {
-                        break 'outer;
-                    }
-                }
+    /// Return the given logical (unwrapped) line, if it exists.
+    fn logical_line(&self, index: usize) -> Option<&str> {
+        let mut acc = 0;
+        for block in &self.0 {
+            let lines = block.lines();
+            if index < acc + lines.len() {
+                return Some(&lines[index - acc]);
             }
+            acc += lines.len();
         }
-
-        lines.reverse();
-        (lines, logical_lines_on_screen)
+        None
     }
 
-    /// Render a middle element of the history, offset given by logical lines within.
-    ///
-    /// Helper function for [`Self::render()`].
-    fn render_from_top(
-        &self,
-        scroll: usize,
-        width: usize,
-        height: usize,
-    ) -> (Vec<Line<'static>>, usize) {
-        // Show the window starting `scroll` logical lines in: skip that many lines without
-        // wrapping, then wrap until the window is full.
-        let mut to_skip = scroll;
-        let mut lines = Vec::new();
-        let mut logical_lines_on_screen = 0;
-
-        'outer: for block in self.content.iter() {
-            for logical in block.lines().iter() {
-                if to_skip > 0 {
-                    to_skip -= 1;
-                    continue;
-                }
-                if lines.len() >= height {
-                    break 'outer;
-                }
-
-                logical_lines_on_screen += 1;
-                for line in block.render_line(logical, width) {
-                    lines.push(line);
-                    if lines.len() >= height {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-
-        (lines, logical_lines_on_screen)
+    /// Return all the blocks of the history, in order.
+    fn blocks(&self) -> impl Iterator<Item = &ChatBlock> {
+        self.0.iter()
     }
 }
 
 impl ChatBlock {
-    /// Return the number of logical lines of this block.
-    ///
-    /// This does not take into account wrapping because of the screen width, but assumes infinite
-    /// width.
-    fn logical_line_count(&self) -> usize {
-        match self {
-            ChatBlock::User(b)
-            | ChatBlock::Content(b)
-            | ChatBlock::Reasoning(b)
-            | ChatBlock::ToolCall(b)
-            | ChatBlock::ToolResultOk(b)
-            | ChatBlock::ToolResultErr(b) => b.lines.len(),
-        }
-    }
-
     /// Return the logical (unwrapped) lines of this block.
     fn lines(&self) -> &[String] {
         match self {
@@ -1045,20 +1233,26 @@ impl ChatBlock {
 
     /// Wrap the given logical line at `line_width` and return the styled
     /// display lines for it.
+    #[cfg(test)]
     fn render_line(&self, line: &str, line_width: usize) -> Vec<Line<'static>> {
-        let (style, alignment) = self.style_alignment();
-
         textwrap::wrap(line, line_width)
             .into_iter()
-            .map(|line| Line {
-                style,
-                alignment,
-                spans: vec![Span {
-                    style: Default::default(),
-                    content: line.into_owned().into(),
-                }],
-            })
+            .map(|line| self.style_fragment(line.into_owned()))
             .collect()
+    }
+
+    /// Style the given wrapped fragment as a display line.
+    fn style_fragment(&self, fragment: String) -> Line<'static> {
+        let (style, alignment) = self.style_alignment();
+
+        Line {
+            style,
+            alignment,
+            spans: vec![Span {
+                style: Default::default(),
+                content: fragment.into(),
+            }],
+        }
     }
 
     /// Return the style and alignment of this block’s lines.
@@ -1209,7 +1403,7 @@ mod tests {
 
     /// Build a single content block with one logical line per entry.
     fn content_history(lines: &[&str]) -> ChatHistory {
-        let mut history = ChatHistory::default();
+        let mut history = ChatHistory::new();
         for line in lines {
             history.push(AgentUpdate::Content {
                 append: format!("{line}\n"),
@@ -1235,34 +1429,71 @@ mod tests {
     fn pane_shows_the_tail_with_wrapping() {
         // At width 5, "bbbbbbbb" wraps to two lines, so the history has four display lines for
         // three logical lines.
-        let history = content_history(&["aaaaa", "bbbbbbbb", "cc"]);
+        let mut history = content_history(&["aaaaa", "bbbbbbbb", "cc"]);
 
-        let (lines, logical_lines_on_screen) = history.render(usize::MAX, 5, 3);
+        history.set_layout(5, 3);
+        let lines = history.render();
         assert_eq!(line_texts(&lines), vec!["bbbbb", "bbb", "cc"]);
-        // The window is filled by the last two logical lines.
-        assert_eq!(logical_lines_on_screen, 2);
     }
 
     #[test]
-    fn pane_skips_logical_not_display_lines() {
-        // At width 5, "xxxx x" wraps to two display lines. Skipping one *logical* line must start
-        // the window at "yyyy", not at the second display line of the first.
-        let history = content_history(&["xxxx x", "yyyy"]);
+    fn pane_anchors_at_display_lines() {
+        // At width 5, "xxxx x" wraps to two display lines. The anchor of the third display line is
+        // the start of "yyyy", so the view starts there, not at the second display line of the
+        // first logical line.
+        let mut history = content_history(&["xxxx x", "yyyy"]);
 
-        let (lines, logical_lines_on_screen) = history.render(1, 5, 2);
+        history.set_layout(5, 2);
+        history.scroll = history.anchor_at_row(2);
+        let lines = history.render();
         assert_eq!(line_texts(&lines), vec!["yyyy", ""]);
-        assert_eq!(logical_lines_on_screen, 1);
     }
 
     #[test]
-    fn pane_pads_short_histories_and_counts_visited_lines() {
-        // The empty logical line renders as an empty display line, and is counted when the tail
-        // walk visits it.
-        let history = content_history(&["a", "", "b"]);
+    fn pane_pads_short_histories() {
+        // The empty logical line renders as an empty display line.
+        let mut history = content_history(&["a", "", "b"]);
 
-        let (lines, logical_lines_on_screen) = history.render(usize::MAX, 10, 5);
+        history.set_layout(10, 5);
+        let lines = history.render();
         assert_eq!(line_texts(&lines), vec!["a", "", "b", "", ""]);
-        assert_eq!(logical_lines_on_screen, 3);
+    }
+
+    #[test]
+    fn scroll_steps_are_exact_display_lines() {
+        // "aaaaaa" wraps to ["aaaaa", "a"] at width 5, so the history has
+        // three display lines for two logical lines. The tail view’s top line
+        // is the second fragment of the first logical line.
+        let mut history = content_history(&["aaaaaa", "bbbb"]);
+
+        history.set_layout(5, 2);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["a", "bbbb"]);
+
+        // Scrolling up one display line moves the top to the first fragment
+        // of the same logical line.
+        let first = history.cache.total.saturating_sub(2);
+        history.scroll = history.anchor_at_row(first.saturating_sub(1));
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["aaaaa", "a"]);
+    }
+
+    #[test]
+    fn anchor_survives_a_width_change() {
+        let mut history = content_history(&["aaaaaa", "bbbbbb", "cccc"]);
+
+        // At width 5 the display lines are aaaaa, a, bbbbb, b, cccc; anchor
+        // at the line starting with "bbbbb".
+        history.set_layout(5, 5);
+        history.scroll = history.anchor_at_row(2);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["bbbbb", "b", "cccc", "", ""]);
+
+        // At width 10 the same anchor character starts "bbbbbb", so the view
+        // stays on it after the reflow.
+        history.set_layout(10, 5);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["bbbbbb", "cccc", "", "", ""]);
     }
 
     #[test]
@@ -1277,7 +1508,7 @@ mod tests {
             },
         };
 
-        let mut history = ChatHistory::default();
+        let mut history = ChatHistory::new();
         history.push(AgentUpdate::ToolCallEx {
             call: call.clone(),
             display: "bash: echo hi".into(),
@@ -1291,17 +1522,17 @@ mod tests {
             display: Err("command not found".into()),
         });
 
-        assert_eq!(history.logical_line_count(), 3);
+        assert_eq!(history.content.logical_line_count(), 3);
 
-        let (text, style) = first_rendered_line(&history.content[0], 80);
+        let (text, style) = first_rendered_line(&history.content.0[0], 80);
         assert_eq!(text, "[call_1] bash: echo hi");
         assert_eq!(style.fg, Some(Color::Blue));
 
-        let (text, style) = first_rendered_line(&history.content[1], 80);
+        let (text, style) = first_rendered_line(&history.content.0[1], 80);
         assert_eq!(text, "=[bash/call_1]=> hi");
         assert_eq!(style.fg, Some(Color::Green));
 
-        let (text, style) = first_rendered_line(&history.content[2], 80);
+        let (text, style) = first_rendered_line(&history.content.0[2], 80);
         assert_eq!(text, "=[bash/call_1]=> command not found");
         assert_eq!(style.fg, Some(Color::Red));
         assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -1364,12 +1595,12 @@ mod tests {
             append: "hello".into(),
         });
 
-        assert!(agents.state[0].history.content.is_empty());
+        assert!(agents.state[0].history.content.0.is_empty());
         assert_eq!(
             agents.state[1].subagent_state.as_ref().unwrap().id,
             SubagentId::new(1)
         );
-        assert!(!agents.state[1].history.content.is_empty());
+        assert!(!agents.state[1].history.content.0.is_empty());
 
         // A dropped subagent must not be routable.
         assert!(
