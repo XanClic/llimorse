@@ -146,7 +146,7 @@ impl WrappedCache {
             self.width = width;
             self.line_lengths = history
                 .logical_lines()
-                .map(|line| textwrap::wrap(line, width).len())
+                .map(|(line, _)| textwrap::wrap(line, width).len())
                 .collect();
             self.total = self.line_lengths.iter().sum();
             return;
@@ -1061,21 +1061,19 @@ impl ChatHistory {
 
         let mut lines = Vec::with_capacity(visible);
         let mut row = 0; // wrapped-line index of the next logical line
-        let mut line_idx = 0;
-        for block in self.content.blocks() {
-            for logical in block.lines() {
-                let line_len = *self.cache.line_lengths.get(line_idx).unwrap_or(&0);
-                if row + line_len <= first {
-                    row += line_len;
-                    line_idx += 1;
-                    continue; // the whole line is above the view
-                }
-                if row >= first + visible {
-                    break; // the view is full
-                }
+        for (line_idx, (logical, block)) in self.content.logical_lines().enumerate() {
+            let line_len = *self.cache.line_lengths.get(line_idx).unwrap_or(&0);
+            if row + line_len <= first {
+                row += line_len;
+                continue; // the whole line is above the view
+            }
+            if row >= first + visible {
+                break; // the view is full
+            }
 
-                let from = first.saturating_sub(row);
-                let to = (first + visible - row).min(line_len);
+            let from = first.saturating_sub(row);
+            let to = (first + visible - row).min(line_len);
+            if let Some(block) = block {
                 for fragment in textwrap::wrap(logical, width)
                     .into_iter()
                     .skip(from)
@@ -1083,9 +1081,12 @@ impl ChatHistory {
                 {
                     lines.push(block.style_fragment(fragment.into_owned()));
                 }
-                row += line_len;
-                line_idx += 1;
+            } else {
+                for _ in from..to {
+                    lines.push(Line::default());
+                }
             }
+            row += line_len;
         }
 
         lines.resize(height, Line::default());
@@ -1138,6 +1139,35 @@ impl ChatHistory {
     }
 }
 
+/// Iterate over the chat history, inserting empty lines between blocks
+struct BlockSepIterator<'a, B: Iterator<Item = &'a ChatBlock>> {
+    /// Iterator over all blocks
+    blocks: B,
+    /// The current block and an iterator over its logical lines
+    current_block: Option<(&'a ChatBlock, std::slice::Iter<'a, String>)>,
+}
+
+impl<'a, B: Iterator<Item = &'a ChatBlock>> Iterator for BlockSepIterator<'a, B> {
+    type Item = (&'a str, Option<&'a ChatBlock>);
+
+    fn next(&mut self) -> Option<(&'a str, Option<&'a ChatBlock>)> {
+        let Some((block, block_iter)) = self.current_block.as_mut() else {
+            // Can only happen at the start
+            let block = self.blocks.next()?;
+            self.current_block = Some((block, block.lines().iter()));
+            return self.next(); // no empty line because we are at the start
+        };
+
+        let Some(next) = block_iter.next() else {
+            let block = self.blocks.next()?;
+            self.current_block = Some((block, block.lines().iter()));
+            return Some(("", None)); // empty line separating blocks
+        };
+
+        Some((next as &str, Some(block)))
+    }
+}
+
 impl ChatHistoryContent {
     /// Push the given update into the history.
     fn push(&mut self, update: AgentUpdate) {
@@ -1187,29 +1217,32 @@ impl ChatHistoryContent {
         }
     }
 
-    /// Return all the logical (unwrapped) lines of the history, in order.
-    fn logical_lines(&self) -> impl Iterator<Item = &str> {
-        self.0
-            .iter()
-            .flat_map(|block| block.lines().iter().map(String::as_str))
+    /// Return the logical lines (unwrapped) of the history, in order: the lines of each block,
+    /// with a blank line between consecutive blocks (marked by `None`). The blank space between
+    /// blocks is a presentation decision of the render code; the data has no separator. Empty
+    /// blocks contribute no lines, but a separator is still emitted at each block boundary.
+    fn logical_lines(&self) -> impl Iterator<Item = (&str, Option<&ChatBlock>)> {
+        BlockSepIterator {
+            blocks: self.blocks(),
+            current_block: None,
+        }
     }
 
-    /// Return the number of logical (unwrapped) lines in the history.
+    /// Return the number of logical (unwrapped) lines in the history, including the blank lines
+    /// between blocks.
     fn logical_line_count(&self) -> usize {
-        self.0.iter().map(|block| block.lines().len()).sum()
+        let mut lines = 0;
+        let mut blocks = 0usize;
+        for block in self.blocks() {
+            lines += block.lines().len();
+            blocks += 1;
+        }
+        lines + blocks.saturating_sub(1)
     }
 
     /// Return the given logical (unwrapped) line, if it exists.
     fn logical_line(&self, index: usize) -> Option<&str> {
-        let mut acc = 0;
-        for block in &self.0 {
-            let lines = block.lines();
-            if index < acc + lines.len() {
-                return Some(&lines[index - acc]);
-            }
-            acc += lines.len();
-        }
-        None
+        self.logical_lines().nth(index).map(|(line, _)| line)
     }
 
     /// Return all the blocks of the history, in order.
@@ -1522,7 +1555,8 @@ mod tests {
             display: Err("command not found".into()),
         });
 
-        assert_eq!(history.content.logical_line_count(), 3);
+        // Three blocks of one line each, plus the blank line between each pair.
+        assert_eq!(history.content.logical_line_count(), 5);
 
         let (text, style) = first_rendered_line(&history.content.0[0], 80);
         assert_eq!(text, "[call_1] bash: echo hi");
@@ -1536,6 +1570,93 @@ mod tests {
         assert_eq!(text, "=[bash/call_1]=> command not found");
         assert_eq!(style.fg, Some(Color::Red));
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn blocks_are_separated_by_blank_lines() {
+        // The blank space between blocks is a presentation decision of the
+        // render code: two blocks of one line each yield three display
+        // lines, and the middle one is empty and unstyled.
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::User {
+            prompt: "hi".into(),
+        });
+        history.push(AgentUpdate::Content {
+            append: "hello".into(),
+        });
+
+        assert_eq!(history.content.logical_line_count(), 3);
+
+        history.set_layout(20, 5);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["hi", "", "hello", "", ""]);
+
+        // The separator is a display line, so anchoring counts it: the
+        // anchor of the third display line is the start of "hello".
+        history.set_layout(20, 3);
+        history.scroll = history.anchor_at_row(2);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["hello", "", ""]);
+    }
+
+    #[test]
+    fn empty_blocks_take_no_lines_but_keep_their_separators() {
+        // An empty block (e.g. from an empty streaming delta after a tool result) contributes
+        // no lines of its own, but a separator is still emitted at each of its boundaries, so
+        // the count must agree with the iterator.
+        let call = ToolCall {
+            id: "call_1".into(),
+            call: ToolCallParams::Function {
+                function: FunctionCall {
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+            },
+        };
+
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::ToolCallEx {
+            call: call.clone(),
+            display: "bash: echo hi".into(),
+        });
+        history.push(AgentUpdate::ToolResultEx {
+            call: call.clone(),
+            display: Ok("hi".into()),
+        });
+        history.push(AgentUpdate::Content {
+            append: String::new(),
+        });
+        history.push(AgentUpdate::User {
+            prompt: "hi".into(),
+        });
+
+        // Three non-empty lines and one empty block: 3 lines + 3 separators.
+        assert_eq!(history.content.logical_line_count(), 6);
+        assert_eq!(history.content.logical_lines().count(), 6);
+
+        history.set_layout(80, 6);
+        let lines = history.render();
+        assert_eq!(
+            line_texts(&lines),
+            vec![
+                "[call_1] bash: echo hi",
+                "",
+                "=[bash/call_1]=> hi",
+                "",
+                "",
+                "hi"
+            ]
+        );
+
+        // A lone empty block takes no space at all.
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: String::new(),
+        });
+        assert_eq!(history.content.logical_line_count(), 0);
+        history.set_layout(20, 3);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["", "", ""]);
     }
 
     #[test]
