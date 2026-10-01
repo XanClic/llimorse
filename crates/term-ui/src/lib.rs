@@ -28,7 +28,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use std::{env, fmt, io};
+use std::{env, fmt, io, mem, slice};
 use tokio::sync::oneshot;
 
 /// Counts users of the ratatui terminal (honestly only should be one or none...)
@@ -146,7 +146,7 @@ impl WrappedCache {
             self.width = width;
             self.line_lengths = history
                 .logical_lines()
-                .map(|(line, _)| textwrap::wrap(line, width).len())
+                .map(|(line, _)| textwrap::wrap(&line, width).len())
                 .collect();
             self.total = self.line_lengths.iter().sum();
             return;
@@ -168,12 +168,12 @@ impl WrappedCache {
         let last = count - 1;
         if last < self.line_lengths.len() {
             let line = history.logical_line(last).expect("line exists");
-            self.line_lengths[last] = textwrap::wrap(line, width).len();
+            self.line_lengths[last] = textwrap::wrap(&line, width).len();
         }
 
         for i in self.line_lengths.len()..count {
             let line = history.logical_line(i).expect("line exists");
-            self.line_lengths.push(textwrap::wrap(line, width).len());
+            self.line_lengths.push(textwrap::wrap(&line, width).len());
         }
 
         self.total = self.line_lengths.iter().sum();
@@ -190,7 +190,7 @@ impl WrappedCache {
         }
 
         let logical = history.logical_line(line).expect("line exists");
-        let starts = fragment_starts(logical, &textwrap::wrap(logical, self.width));
+        let starts = fragment_starts(&logical, &textwrap::wrap(&logical, self.width));
         let frag = starts.iter().rposition(|&start| start <= col).unwrap_or(0);
         row + frag
     }
@@ -206,7 +206,7 @@ impl WrappedCache {
         for (line, &len) in self.line_lengths.iter().enumerate() {
             if row < acc + len {
                 let logical = history.logical_line(line).expect("line exists");
-                let starts = fragment_starts(logical, &textwrap::wrap(logical, self.width));
+                let starts = fragment_starts(&logical, &textwrap::wrap(&logical, self.width));
                 let col = starts[row - acc];
                 return ScrollPosition::Anchor { line, col };
             }
@@ -291,11 +291,25 @@ enum ChatBlock {
 /// The content of a block in the chat with some semantic
 #[derive(Debug, Default)]
 struct ChatBlockContent {
-    /// The actual lines of content
-    lines: Vec<String>,
+    /// The actual lines of content that are seen as “finalized”, i.e. separated by \n\n.
+    lines_finalized: Vec<String>,
+
+    /// Tokens that are still coming in, not yet finalized.
+    lines_active: Vec<Vec<Token>>,
 
     /// Trailing whitespace, tracked separately because we do not want to show it
     trailing_whitespace: String,
+}
+
+/// A raw token.
+#[derive(Debug)]
+struct Token {
+    /// The token text
+    text: String,
+
+    /// When this token came in
+    #[allow(dead_code)]
+    created_at: Instant,
 }
 
 impl TermUi {
@@ -723,6 +737,11 @@ impl ui::UiState for TermUi {
                 self.queued_prompts.push_back(sanitized);
             }
             ui::Notification::AwaitingPrompt { response } => {
+                if let Some(main) = self.agents.get_mut(&AgentId::Main)
+                    && let Some(last_block) = main.history.content.last_block_mut()
+                {
+                    last_block.finalize();
+                }
                 self.processing = false;
                 self.notify_prompt_done(response);
             }
@@ -1074,7 +1093,7 @@ impl ChatHistory {
             let from = first.saturating_sub(row);
             let to = (first + visible - row).min(line_len);
             if let Some(block) = block {
-                for fragment in textwrap::wrap(logical, width)
+                for fragment in textwrap::wrap(&logical, width)
                     .into_iter()
                     .skip(from)
                     .take(to - from)
@@ -1139,67 +1158,81 @@ impl ChatHistory {
     }
 }
 
+/// Iterate over all (string) lines in a chat block
+struct ChatBlockLineIterator<'a> {
+    /// Finalized lines
+    finalized: Option<slice::Iter<'a, String>>,
+    /// Still active lines
+    active: slice::Iter<'a, Vec<Token>>,
+}
+
 /// Iterate over the chat history, inserting empty lines between blocks
 struct BlockSepIterator<'a, B: Iterator<Item = &'a ChatBlock>> {
     /// Iterator over all blocks
     blocks: B,
     /// The current block and an iterator over its logical lines
-    current_block: Option<(&'a ChatBlock, std::slice::Iter<'a, String>)>,
+    current_block: Option<(&'a ChatBlock, ChatBlockLineIterator<'a>)>,
 }
 
 impl<'a, B: Iterator<Item = &'a ChatBlock>> Iterator for BlockSepIterator<'a, B> {
-    type Item = (&'a str, Option<&'a ChatBlock>);
+    type Item = (Cow<'a, str>, Option<&'a ChatBlock>);
 
-    fn next(&mut self) -> Option<(&'a str, Option<&'a ChatBlock>)> {
+    fn next(&mut self) -> Option<(Cow<'a, str>, Option<&'a ChatBlock>)> {
         let Some((block, block_iter)) = self.current_block.as_mut() else {
             // Can only happen at the start
             let block = self.blocks.next()?;
-            self.current_block = Some((block, block.lines().iter()));
+            self.current_block = Some((block, block.lines()));
             return self.next(); // no empty line because we are at the start
         };
 
         let Some(next) = block_iter.next() else {
             let block = self.blocks.next()?;
-            self.current_block = Some((block, block.lines().iter()));
-            return Some(("", None)); // empty line separating blocks
+            self.current_block = Some((block, block.lines()));
+            return Some((Cow::Borrowed(""), None)); // empty line separating blocks
         };
 
-        Some((next as &str, Some(block)))
+        Some((next, Some(block)))
     }
 }
 
 impl ChatHistoryContent {
     /// Push the given update into the history.
     fn push(&mut self, update: AgentUpdate) {
-        match update {
+        let new_block = match update {
             AgentUpdate::User { prompt } => {
-                self.0.push(ChatBlock::User(prompt.into()));
+                let mut block = ChatBlock::User(prompt.into());
+                block.finalize(); // User blocks are always finalized
+                block
             }
 
             AgentUpdate::Content { append } => {
                 if let Some(last) = self.0.last_mut()
                     && let ChatBlock::Content(block) = last
                 {
-                    block.append(&append);
-                } else {
-                    self.0.push(ChatBlock::Content(append.into()));
+                    block.append(append);
+                    return; // no new block added, return immediately
                 }
+
+                ChatBlock::Content(append.into())
             }
 
             AgentUpdate::Reasoning { append } => {
                 if let Some(last) = self.0.last_mut()
                     && let ChatBlock::Reasoning(block) = last
                 {
-                    block.append(&append);
-                } else {
-                    self.0.push(ChatBlock::Reasoning(append.into()));
+                    block.append(append);
+                    return; // no new block added, return immediately
                 }
+
+                ChatBlock::Reasoning(append.into())
             }
 
             AgentUpdate::ToolCallEx { call, display } => {
-                self.0.push(ChatBlock::ToolCall(
-                    format!("[{}] {display}", call.id).into(),
-                ));
+                let mut block = ChatBlock::ToolCall(format!("[{}] {display}", call.id).into());
+                // Tool call blocks always arrive as one chunk (TODO: They shouldn’t), so until we
+                // can make this nicer, finalize them at once.
+                block.finalize();
+                block
             }
 
             AgentUpdate::ToolResultEx { call, display } => {
@@ -1208,20 +1241,28 @@ impl ChatHistoryContent {
                     Ok(display) => format!("=[{name}/{}]=> {display}", call.id),
                     Err(err) => format!("=[{name}/{}]=> {err}", call.id),
                 };
-                let block = match display {
+                let mut block = match display {
                     Ok(_) => ChatBlock::ToolResultOk(line.into()),
                     Err(_) => ChatBlock::ToolResultErr(line.into()),
                 };
-                self.0.push(block);
+                // Tool result blocks always arrive as one chunk (TODO: They shouldn’t), so until
+                // we can make this nicer, finalize them at once.
+                block.finalize();
+                block
             }
+        };
+
+        if let Some(last_block) = self.last_block_mut() {
+            last_block.finalize();
         }
+        self.0.push(new_block);
     }
 
     /// Return the logical lines (unwrapped) of the history, in order: the lines of each block,
     /// with a blank line between consecutive blocks (marked by `None`). The blank space between
     /// blocks is a presentation decision of the render code; the data has no separator. Empty
     /// blocks contribute no lines, but a separator is still emitted at each block boundary.
-    fn logical_lines(&self) -> impl Iterator<Item = (&str, Option<&ChatBlock>)> {
+    fn logical_lines(&self) -> impl Iterator<Item = (Cow<'_, str>, Option<&ChatBlock>)> {
         BlockSepIterator {
             blocks: self.blocks(),
             current_block: None,
@@ -1234,14 +1275,14 @@ impl ChatHistoryContent {
         let mut lines = 0;
         let mut blocks = 0usize;
         for block in self.blocks() {
-            lines += block.lines().len();
+            lines += block.line_count();
             blocks += 1;
         }
         lines + blocks.saturating_sub(1)
     }
 
     /// Return the given logical (unwrapped) line, if it exists.
-    fn logical_line(&self, index: usize) -> Option<&str> {
+    fn logical_line(&self, index: usize) -> Option<Cow<'_, str>> {
         self.logical_lines().nth(index).map(|(line, _)| line)
     }
 
@@ -1249,19 +1290,51 @@ impl ChatHistoryContent {
     fn blocks(&self) -> impl Iterator<Item = &ChatBlock> {
         self.0.iter()
     }
+
+    /// Return a mutable to the last (latest) block, if any
+    fn last_block_mut(&mut self) -> Option<&mut ChatBlock> {
+        self.0.last_mut()
+    }
 }
 
 impl ChatBlock {
-    /// Return the logical (unwrapped) lines of this block.
-    fn lines(&self) -> &[String] {
+    /// Return the text content of this block.
+    fn content(&self) -> &ChatBlockContent {
         match self {
             ChatBlock::User(b)
             | ChatBlock::Content(b)
             | ChatBlock::Reasoning(b)
             | ChatBlock::ToolCall(b)
             | ChatBlock::ToolResultOk(b)
-            | ChatBlock::ToolResultErr(b) => &b.lines,
+            | ChatBlock::ToolResultErr(b) => b,
         }
+    }
+
+    /// Return a mutable reference to the text content of this block.
+    fn content_mut(&mut self) -> &mut ChatBlockContent {
+        match self {
+            ChatBlock::User(b)
+            | ChatBlock::Content(b)
+            | ChatBlock::Reasoning(b)
+            | ChatBlock::ToolCall(b)
+            | ChatBlock::ToolResultOk(b)
+            | ChatBlock::ToolResultErr(b) => b,
+        }
+    }
+
+    /// Return the logical (unwrapped) lines of this block.
+    fn lines(&self) -> ChatBlockLineIterator<'_> {
+        let content = self.content();
+        ChatBlockLineIterator {
+            finalized: Some(content.lines_finalized.iter()),
+            active: content.lines_active.iter(),
+        }
+    }
+
+    /// Return the number of logical (unwrapped) lines in this block.
+    fn line_count(&self) -> usize {
+        let content = self.content();
+        content.lines_finalized.len() + content.lines_active.len()
     }
 
     /// Wrap the given logical line at `line_width` and return the styled
@@ -1299,21 +1372,74 @@ impl ChatBlock {
             ChatBlock::ToolResultErr(_) => (Style::default().bold().red(), None),
         }
     }
+
+    /// This block is done, so empty the active part out, and make it all finalized.
+    fn finalize(&mut self) {
+        self.content_mut().finalize();
+    }
+}
+
+impl<'a> Iterator for ChatBlockLineIterator<'a> {
+    type Item = Cow<'a, str>;
+
+    fn next(&mut self) -> Option<Cow<'a, str>> {
+        if let Some(finalized_iter) = self.finalized.as_mut() {
+            if let Some(finalized) = finalized_iter.next() {
+                return Some(Cow::Borrowed(finalized));
+            } else {
+                self.finalized = None;
+            }
+        }
+
+        Some(Cow::Owned(
+            self.active
+                .next()?
+                .iter()
+                .map(|token| &token.text as &str)
+                .collect::<String>(),
+        ))
+    }
 }
 
 impl ChatBlockContent {
-    /// Append `string` to this block
-    fn append(&mut self, string: &str) {
-        let full_string = format!("{}{string}", self.trailing_whitespace);
+    /// Append `token` to this block
+    fn append(&mut self, token: String) {
+        let full_string = format!("{}{token}", self.trailing_whitespace);
         let (iter, trailing_ws) = Self::split_up(&full_string);
 
         if let Some(mut iter) = iter {
-            if let Some(last) = self.lines.last_mut() {
-                last.push_str(iter.next().expect("split_up() returned an empty iterator"));
+            if let Some(last) = self.lines_active.last_mut() {
+                let string = iter.next().expect("split_up() returned an empty iterator");
+                if !string.is_empty() {
+                    last.push(string.to_string().into());
+                }
             }
-            self.lines.extend(iter.map(String::from));
+
+            self.lines_active.extend(iter.map(|string| {
+                if string.is_empty() {
+                    vec![]
+                } else {
+                    vec![string.to_string().into()]
+                }
+            }));
         }
+
         self.trailing_whitespace = trailing_ws.to_string();
+
+        // Find an empty line; that’s where we split.
+        let Some(split_index) = self.lines_active.iter().position(Vec::is_empty) else {
+            return;
+        };
+
+        // Note that split_index points to the empty line, and we need it to point after
+        let remaining = self.lines_active.split_off(split_index + 1);
+        let finalized = mem::replace(&mut self.lines_active, remaining);
+
+        // TODO: Markdown parsing
+        for line in finalized {
+            self.lines_finalized
+                .push(line.into_iter().map(|token| token.text).collect::<String>());
+        }
     }
 
     /// Internal helper: Split up string by lines, and return trailing whitespace
@@ -1331,21 +1457,26 @@ impl ChatBlockContent {
             (Some(iterator), ws)
         }
     }
+
+    /// This block is done, so empty the active part out, and make it all finalized.
+    fn finalize(&mut self) {
+        for line in self.lines_active.drain(..) {
+            self.lines_finalized
+                .push(line.into_iter().map(|token| token.text).collect::<String>());
+        }
+    }
 }
 
 impl From<&str> for ChatBlockContent {
     /// Use `string` as a whole as block content
     fn from(string: &str) -> Self {
-        let (iter, trailing_ws) = Self::split_up(string);
-        let lines = if let Some(iter) = iter {
-            iter.map(String::from).collect()
-        } else {
-            Vec::new()
+        let mut this = ChatBlockContent {
+            lines_finalized: Vec::new(),
+            lines_active: Vec::new(),
+            trailing_whitespace: String::new(),
         };
-        ChatBlockContent {
-            lines,
-            trailing_whitespace: trailing_ws.to_string(),
-        }
+        this.append(string.to_string());
+        this
     }
 }
 
@@ -1353,6 +1484,16 @@ impl From<String> for ChatBlockContent {
     /// Use `string` as a whole as block content
     fn from(string: String) -> Self {
         (&string as &str).into()
+    }
+}
+
+impl From<String> for Token {
+    /// Create a single token from the given string, created now
+    fn from(string: String) -> Self {
+        Token {
+            text: string,
+            created_at: Instant::now(),
+        }
     }
 }
 
@@ -1422,7 +1563,7 @@ mod tests {
     /// Render the first (only) line of `block` and return its text and style.
     fn first_rendered_line(block: &ChatBlock, width: usize) -> (String, Style) {
         let line = block
-            .render_line(&block.lines()[0], width)
+            .render_line(&block.lines().next().unwrap(), width)
             .into_iter()
             .next()
             .expect("block renders at least one line");
