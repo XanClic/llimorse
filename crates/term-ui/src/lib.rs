@@ -331,22 +331,54 @@ struct ChatBlockContent {
     /// The actual lines of content that are seen as “finalized”, i.e. separated by \n\n.
     lines_finalized: Vec<FinalLine>,
 
-    /// Tokens that are still coming in, not yet finalized.
-    lines_active: Vec<Vec<Token>>,
+    /// Lines that are still coming in, not yet finalized.
+    lines_active: Vec<ActiveLine>,
 
     /// Trailing whitespace, tracked separately because we do not want to show it
     trailing_whitespace: String,
 }
 
-/// A raw token.
-#[derive(Debug)]
-struct Token {
-    /// The token text
+/// An active line: the accumulated text, and the register of tokens that make it up.
+#[derive(Debug, Default)]
+struct ActiveLine {
+    /// The accumulated text of the line
     text: String,
 
+    /// One entry per token: the byte offset into `text` at which the token starts, and the
+    /// token’s metadata. Token *i* spans `text[offsets[i] .. offsets[i + 1]]` (or the end of
+    /// the line for the last token).
+    tokens: Vec<(usize, Token)>,
+}
+
+/// The per-token metadata for an active line.
+#[derive(Debug)]
+struct Token {
     /// When this token came in
     #[allow(dead_code)]
     created_at: Instant,
+}
+
+impl ActiveLine {
+    /// Append `string` to this line as a new token.
+    fn push_token(&mut self, string: &str) {
+        self.tokens.push((
+            self.text.len(),
+            Token {
+                created_at: Instant::now(),
+            },
+        ));
+        self.text.push_str(string);
+    }
+
+    /// Create an active line from a single chunk of text (stored as one token), or an empty
+    /// line if `string` is empty.
+    fn from_chunk(string: &str) -> Self {
+        let mut line = Self::default();
+        if !string.is_empty() {
+            line.push_token(string);
+        }
+        line
+    }
 }
 
 impl TermUi {
@@ -1208,7 +1240,7 @@ struct ChatBlockLineIterator<'a> {
     /// Finalized lines
     finalized: Option<slice::Iter<'a, FinalLine>>,
     /// Still active lines
-    active: slice::Iter<'a, Vec<Token>>,
+    active: slice::Iter<'a, ActiveLine>,
 }
 
 /// A logical line of the history: its text, the block it belongs to (`None` for the blank
@@ -1522,16 +1554,8 @@ impl<'a> Iterator for ChatBlockLineIterator<'a> {
             }
         }
 
-        Some((
-            Cow::Owned(
-                self.active
-                    .next()?
-                    .iter()
-                    .map(|token| &token.text as &str)
-                    .collect::<String>(),
-            ),
-            None,
-        ))
+        let line = self.active.next()?;
+        Some((Cow::Borrowed(&line.text), None))
     }
 }
 
@@ -1547,23 +1571,21 @@ impl ChatBlockContent {
             if let Some(last) = self.lines_active.last_mut() {
                 let string = iter.next().expect("split_up() returned an empty iterator");
                 if !string.is_empty() {
-                    last.push(string.to_string().into());
+                    last.push_token(string);
                 }
             }
 
-            self.lines_active.extend(iter.map(|string| {
-                if string.is_empty() {
-                    vec![]
-                } else {
-                    vec![string.to_string().into()]
-                }
-            }));
+            self.lines_active.extend(iter.map(ActiveLine::from_chunk));
         }
 
         self.trailing_whitespace = trailing_ws.to_string();
 
         // Find an empty line; that’s where we split.
-        let Some(split_index) = self.lines_active.iter().position(Vec::is_empty) else {
+        let Some(split_index) = self
+            .lines_active
+            .iter()
+            .position(|line| line.text.is_empty())
+        else {
             return false;
         };
 
@@ -1573,8 +1595,7 @@ impl ChatBlockContent {
 
         let mut parser = markdown::Parser::default();
         for line in finalized {
-            let line = line.into_iter().map(|token| token.text).collect::<String>();
-            let (text, styles) = parser.push(&line);
+            let (text, styles) = parser.push(&line.text);
             self.lines_finalized.push(FinalLine { text, styles });
         }
 
@@ -1607,8 +1628,7 @@ impl ChatBlockContent {
 
         let mut parser = markdown::Parser::default();
         for line in self.lines_active.drain(..) {
-            let line = line.into_iter().map(|token| token.text).collect::<String>();
-            let (text, styles) = parser.push(&line);
+            let (text, styles) = parser.push(&line.text);
             self.lines_finalized.push(FinalLine { text, styles });
         }
 
@@ -1633,16 +1653,6 @@ impl From<String> for ChatBlockContent {
     /// Use `string` as a whole as block content
     fn from(string: String) -> Self {
         (&string as &str).into()
-    }
-}
-
-impl From<String> for Token {
-    /// Create a single token from the given string, created now
-    fn from(string: String) -> Self {
-        Token {
-            text: string,
-            created_at: Instant::now(),
-        }
     }
 }
 
@@ -2021,12 +2031,12 @@ mod tests {
         );
     }
 
-    /// Join the tokens of each active line of a block's content into plain strings.
+    /// The texts of each active line of a block's content.
     fn active_texts(content: &ChatBlockContent) -> Vec<String> {
         content
             .lines_active
             .iter()
-            .map(|line| line.iter().map(|token| token.text.as_str()).collect())
+            .map(|line| line.text.clone())
             .collect()
     }
 
