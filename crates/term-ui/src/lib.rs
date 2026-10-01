@@ -1931,4 +1931,105 @@ mod tests {
                 .is_none()
         );
     }
+
+    /// Join the tokens of each active line of a block's content into plain strings.
+    fn active_texts(content: &ChatBlockContent) -> Vec<String> {
+        content
+            .lines_active
+            .iter()
+            .map(|line| line.iter().map(|token| token.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_blank_line_splits_a_block_into_finalized_and_active() {
+        let mut block = ChatBlockContent::default();
+        let finalized = block.append("one\ntwo\n\nthree".to_string());
+        assert!(finalized);
+        assert_eq!(
+            block.lines_finalized,
+            vec!["one".to_string(), "two".to_string(), String::new()]
+        );
+        assert_eq!(active_texts(&block), vec!["three".to_string()]);
+    }
+
+    #[test]
+    fn a_block_finalizes_when_the_next_block_begins() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "streaming".into(),
+        });
+        history.push(AgentUpdate::User {
+            prompt: "next".into(),
+        });
+
+        let content = &history.content.blocks[0];
+        assert_eq!(
+            content.content().lines_finalized,
+            vec!["streaming".to_string()]
+        );
+        assert!(content.content().lines_active.is_empty());
+
+        let user = &history.content.blocks[1];
+        assert_eq!(user.content().lines_finalized, vec!["next".to_string()]);
+        assert!(user.content().lines_active.is_empty());
+    }
+
+    #[test]
+    fn finalize_moves_all_active_lines_to_finalized() {
+        let mut content: ChatBlockContent = "line one\nline two\n".into();
+        assert!(!content.lines_active.is_empty());
+
+        content.finalize();
+        assert_eq!(
+            content.lines_finalized,
+            vec!["line one".to_string(), "line two".to_string()]
+        );
+        assert!(content.lines_active.is_empty());
+    }
+
+    #[test]
+    fn finalize_all_finalizes_the_last_block() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "abc".into(),
+        });
+        assert!(!history.content.blocks[0].content().lines_active.is_empty());
+
+        history.finalize_all();
+        let content = &history.content.blocks[0];
+        assert_eq!(content.content().lines_finalized, vec!["abc".to_string()]);
+        assert!(content.content().lines_active.is_empty());
+    }
+
+    #[test]
+    fn a_finalization_marks_the_wrap_cache_dirty() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "aaaa".into(),
+        });
+        history.set_layout(20, 5);
+        assert!(!history.cache.dirty);
+
+        // The blank line in the continuation finalizes the cached line "aaaa".
+        history.push(AgentUpdate::Content {
+            append: "\n\nbbbb".into(),
+        });
+        assert!(history.cache.dirty);
+    }
+
+    #[test]
+    fn trailing_blank_lines_are_not_displayed() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "hello\n\n".into(),
+        });
+
+        // The trailing blank lines are tracked as whitespace, so only "hello" is a line.
+        assert_eq!(history.content.logical_line_count(), 1);
+
+        history.set_layout(20, 3);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["hello", "", ""]);
+    }
 }
