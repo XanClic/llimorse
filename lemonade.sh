@@ -219,7 +219,7 @@ LEMON_BIN="${LEMON_BIN:-$(command -v lemon || true)}"
 
 # Where llama-server runs, as reachable from the container. The default
 # is podman's name for the host; set LLAMA_HOST for another machine.
-LLAMA_HOST="${LLAMA_HOST:-host.containers.internal}"
+LLAMA_HOST="${LLAMA_HOST:-host.containers.internal:8080}"
 
 [ -x "$LEMON_BIN" ] || { err "lemon binary not found (set LEMON_BIN to point at it)"; exit 1; }
 
@@ -902,7 +902,7 @@ podman run --rm -it --name "lemonade-$$" \
     "$IMAGE" \
     bash -c "$EXPORT_SESSION" export-session \
     lemon --zesty \
-        --llama-url "http://$LLAMA_HOST:8080" \
+        --llama-url "http://$LLAMA_HOST" \
         --searxng-url "http://$SEARXNG:8080" \
         "$@" || status=$?
 status=${status:-0}
