@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
+mod markdown;
 mod wrap;
 
 use anyhow::Result;
@@ -13,6 +14,7 @@ use llimorse::Agent;
 use llimorse::agent::AgentStage;
 use llimorse::client::{ClientInfo, ClientState};
 use llimorse_chat::ui::{self, AgentId, AgentUpdate, SubagentId};
+use markdown::{Effect, MarkdownStyle};
 use parking_lot::RwLock;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
@@ -152,7 +154,7 @@ impl WrappedCache {
             self.width = width;
             self.line_lengths = history
                 .logical_lines()
-                .map(|(line, _)| textwrap::wrap(&line, width).len())
+                .map(|(line, _, _)| textwrap::wrap(&line, width).len())
                 .collect();
             self.total = self.line_lengths.iter().sum();
             return;
@@ -227,27 +229,36 @@ impl WrappedCache {
 
 /// Return the offset of each wrapped fragment within the original line.
 ///
-/// `fragments` is the output of `textwrap::wrap(line, width)`. The fragments
-/// are in order and separated by the whitespace textwrap dropped at the wrap
-/// points, so the offsets are recovered by walking the line.
+/// `fragments` is the output of `textwrap::wrap(line, width)`. The fragments are in order, and
+/// each one is an exact substring of `line` (textwrap only drops whitespace, e.g. at the wrap
+/// points, and keeps the line’s leading whitespace in the first fragment), so the offsets are
+/// recovered by locating each fragment.
 fn fragment_starts(line: &str, fragments: &[Cow<'_, str>]) -> Vec<usize> {
     let mut starts = Vec::with_capacity(fragments.len());
     let mut pos = 0;
 
     for fragment in fragments {
-        while pos < line.len() {
-            let c = line[pos..].chars().next().unwrap();
-            if c.is_whitespace() {
-                pos += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        starts.push(pos);
-        pos += fragment.len();
+        let start = pos + line[pos..].find(fragment.as_ref()).unwrap_or(0);
+        starts.push(start);
+        pos = start + fragment.len();
     }
 
     starts
+}
+
+/// The theme’s representation of a markdown style.
+fn markdown_style(style: MarkdownStyle) -> Style {
+    let mut terminal = Style::default();
+    if style.contains(Effect::Bold) {
+        terminal = terminal.bold();
+    }
+    if style.contains(Effect::Italic) {
+        terminal = terminal.italic();
+    }
+    if style.contains(Effect::Code) {
+        terminal = terminal.blue();
+    }
+    terminal
 }
 
 /// Chat history data, and view
@@ -301,11 +312,24 @@ enum ChatBlock {
     ToolResultErr(ChatBlockContent),
 }
 
+/// A finalized line: the rendered text (markdown syntax removed) and the style register of
+/// that text.
+#[derive(Debug, Default)]
+struct FinalLine {
+    /// The rendered text
+    text: String,
+
+    /// Byte offsets into `text` at which the markdown style changes; each entry’s style lasts
+    /// until the next offset (or the end of the line). Text before the first entry has no markdown
+    /// styling.
+    styles: Vec<(usize, MarkdownStyle)>,
+}
+
 /// The content of a block in the chat with some semantic
 #[derive(Debug, Default)]
 struct ChatBlockContent {
     /// The actual lines of content that are seen as “finalized”, i.e. separated by \n\n.
-    lines_finalized: Vec<String>,
+    lines_finalized: Vec<FinalLine>,
 
     /// Tokens that are still coming in, not yet finalized.
     lines_active: Vec<Vec<Token>>,
@@ -1103,7 +1127,7 @@ impl ChatHistory {
 
         let mut lines = Vec::with_capacity(visible);
         let mut row = 0; // wrapped-line index of the next logical line
-        for (line_idx, (logical, block)) in self.content.logical_lines().enumerate() {
+        for (line_idx, (logical, block, styles)) in self.content.logical_lines().enumerate() {
             let line_len = *self.cache.line_lengths.get(line_idx).unwrap_or(&0);
             if row + line_len <= first {
                 row += line_len;
@@ -1116,12 +1140,10 @@ impl ChatHistory {
             let from = first.saturating_sub(row);
             let to = (first + visible - row).min(line_len);
             if let Some(block) = block {
-                for fragment in textwrap::wrap(&logical, width)
-                    .into_iter()
-                    .skip(from)
-                    .take(to - from)
-                {
-                    lines.push(block.style_fragment(fragment.into_owned()));
+                let fragments = textwrap::wrap(&logical, width);
+                let starts = fragment_starts(&logical, &fragments);
+                for (i, fragment) in fragments.into_iter().enumerate().skip(from).take(to - from) {
+                    lines.push(block.style_fragment(fragment.as_ref(), starts[i], styles));
                 }
             } else {
                 for _ in from..to {
@@ -1184,10 +1206,18 @@ impl ChatHistory {
 /// Iterate over all (string) lines in a chat block
 struct ChatBlockLineIterator<'a> {
     /// Finalized lines
-    finalized: Option<slice::Iter<'a, String>>,
+    finalized: Option<slice::Iter<'a, FinalLine>>,
     /// Still active lines
     active: slice::Iter<'a, Vec<Token>>,
 }
+
+/// A logical line of the history: its text, the block it belongs to (`None` for the blank
+/// separator lines between blocks), and its markdown style register, if it is a finalized line.
+type LogicalLine<'a> = (
+    Cow<'a, str>,
+    Option<&'a ChatBlock>,
+    Option<&'a [(usize, MarkdownStyle)]>,
+);
 
 /// Iterate over the chat history, inserting empty lines between blocks
 struct BlockSepIterator<'a, B: Iterator<Item = &'a ChatBlock>> {
@@ -1198,9 +1228,9 @@ struct BlockSepIterator<'a, B: Iterator<Item = &'a ChatBlock>> {
 }
 
 impl<'a, B: Iterator<Item = &'a ChatBlock>> Iterator for BlockSepIterator<'a, B> {
-    type Item = (Cow<'a, str>, Option<&'a ChatBlock>);
+    type Item = LogicalLine<'a>;
 
-    fn next(&mut self) -> Option<(Cow<'a, str>, Option<&'a ChatBlock>)> {
+    fn next(&mut self) -> Option<Self::Item> {
         let Some((block, block_iter)) = self.current_block.as_mut() else {
             // Can only happen at the start
             let block = self.blocks.next()?;
@@ -1208,13 +1238,13 @@ impl<'a, B: Iterator<Item = &'a ChatBlock>> Iterator for BlockSepIterator<'a, B>
             return self.next(); // no empty line because we are at the start
         };
 
-        let Some(next) = block_iter.next() else {
+        let Some((line, styles)) = block_iter.next() else {
             let block = self.blocks.next()?;
             self.current_block = Some((block, block.lines()));
-            return Some((Cow::Borrowed(""), None)); // empty line separating blocks
+            return Some((Cow::Borrowed(""), None, None)); // empty line separating blocks
         };
 
-        Some((next, Some(block)))
+        Some((line, Some(block), styles))
     }
 }
 
@@ -1305,10 +1335,11 @@ impl ChatHistoryContent {
     }
 
     /// Return the logical lines (unwrapped) of the history, in order: the lines of each block,
-    /// with a blank line between consecutive blocks (marked by `None`). The blank space between
-    /// blocks is a presentation decision of the render code; the data has no separator. Empty
-    /// blocks contribute no lines, but a separator is still emitted at each block boundary.
-    fn logical_lines(&self) -> impl Iterator<Item = (Cow<'_, str>, Option<&ChatBlock>)> {
+    /// with a blank line between consecutive blocks (marked by `None`). Each line carries its
+    /// style register, if it is a finalized line. The blank space between blocks is a presentation
+    /// decision of the render code; the data has no separator. Empty blocks contribute no lines,
+    /// but a separator is still emitted at each block boundary.
+    fn logical_lines(&self) -> impl Iterator<Item = LogicalLine<'_>> {
         BlockSepIterator {
             blocks: self.blocks(),
             current_block: None,
@@ -1329,7 +1360,7 @@ impl ChatHistoryContent {
 
     /// Return the given logical (unwrapped) line, if it exists.
     fn logical_line(&self, index: usize) -> Option<Cow<'_, str>> {
-        self.logical_lines().nth(index).map(|(line, _)| line)
+        self.logical_lines().nth(index).map(|(line, _, _)| line)
     }
 
     /// Return all the blocks of the history, in order.
@@ -1389,22 +1420,74 @@ impl ChatBlock {
     fn render_line(&self, line: &str, line_width: usize) -> Vec<Line<'static>> {
         textwrap::wrap(line, line_width)
             .into_iter()
-            .map(|line| self.style_fragment(line.into_owned()))
+            .map(|line| self.style_fragment(&line, 0, None))
             .collect()
     }
 
     /// Style the given wrapped fragment as a display line.
-    fn style_fragment(&self, fragment: String) -> Line<'static> {
+    ///
+    /// `fragment` is a part of the logical line starting at byte offset `frag_start`; `styles` is
+    /// the style register of that logical line, if it is a finalized line.
+    fn style_fragment(
+        &self,
+        fragment: &str,
+        frag_start: usize,
+        styles: Option<&[(usize, MarkdownStyle)]>,
+    ) -> Line<'static> {
         let (style, alignment) = self.style_alignment();
+        let spans = match styles.filter(|s| !s.is_empty()) {
+            Some(styles) => Self::styled_spans(fragment, frag_start, styles),
+            None => vec![Span {
+                style: Default::default(),
+                content: Cow::Owned(fragment.to_string()),
+            }],
+        };
 
         Line {
             style,
             alignment,
-            spans: vec![Span {
-                style: Default::default(),
-                content: fragment.into(),
-            }],
+            spans,
         }
+    }
+
+    /// Slice `fragment` at the style register’s breakpoints that fall within it, and return the
+    /// resulting spans.
+    fn styled_spans(
+        fragment: &str,
+        frag_start: usize,
+        styles: &[(usize, MarkdownStyle)],
+    ) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let end = frag_start + fragment.len();
+        let mut prev = frag_start;
+        let mut current = Style::default();
+
+        for &(offset, style) in styles {
+            if offset >= end {
+                break;
+            }
+
+            if offset > prev {
+                spans.push(Span {
+                    style: current,
+                    content: Cow::Owned(
+                        fragment[prev - frag_start..offset - frag_start].to_string(),
+                    ),
+                });
+                prev = offset;
+            }
+
+            current = markdown_style(style);
+        }
+
+        if prev < end {
+            spans.push(Span {
+                style: current,
+                content: Cow::Owned(fragment[prev - frag_start..].to_string()),
+            });
+        }
+
+        spans
     }
 
     /// Return the style and alignment of this block’s lines.
@@ -1428,23 +1511,26 @@ impl ChatBlock {
 }
 
 impl<'a> Iterator for ChatBlockLineIterator<'a> {
-    type Item = Cow<'a, str>;
+    type Item = (Cow<'a, str>, Option<&'a [(usize, MarkdownStyle)]>);
 
-    fn next(&mut self) -> Option<Cow<'a, str>> {
+    fn next(&mut self) -> Option<(Cow<'a, str>, Option<&'a [(usize, MarkdownStyle)]>)> {
         if let Some(finalized_iter) = self.finalized.as_mut() {
             if let Some(finalized) = finalized_iter.next() {
-                return Some(Cow::Borrowed(finalized));
+                return Some((Cow::Borrowed(&finalized.text), Some(&finalized.styles)));
             } else {
                 self.finalized = None;
             }
         }
 
-        Some(Cow::Owned(
-            self.active
-                .next()?
-                .iter()
-                .map(|token| &token.text as &str)
-                .collect::<String>(),
+        Some((
+            Cow::Owned(
+                self.active
+                    .next()?
+                    .iter()
+                    .map(|token| &token.text as &str)
+                    .collect::<String>(),
+            ),
+            None,
         ))
     }
 }
@@ -1485,10 +1571,11 @@ impl ChatBlockContent {
         let remaining = self.lines_active.split_off(split_index + 1);
         let finalized = mem::replace(&mut self.lines_active, remaining);
 
-        // TODO: Markdown parsing
+        let mut parser = markdown::Parser::default();
         for line in finalized {
-            self.lines_finalized
-                .push(line.into_iter().map(|token| token.text).collect::<String>());
+            let line = line.into_iter().map(|token| token.text).collect::<String>();
+            let (text, styles) = parser.push(&line);
+            self.lines_finalized.push(FinalLine { text, styles });
         }
 
         true
@@ -1518,9 +1605,11 @@ impl ChatBlockContent {
             return false;
         }
 
+        let mut parser = markdown::Parser::default();
         for line in self.lines_active.drain(..) {
-            self.lines_finalized
-                .push(line.into_iter().map(|token| token.text).collect::<String>());
+            let line = line.into_iter().map(|token| token.text).collect::<String>();
+            let (text, styles) = parser.push(&line);
+            self.lines_finalized.push(FinalLine { text, styles });
         }
 
         true
@@ -1623,7 +1712,7 @@ mod tests {
     /// Render the first (only) line of `block` and return its text and style.
     fn first_rendered_line(block: &ChatBlock, width: usize) -> (String, Style) {
         let line = block
-            .render_line(&block.lines().next().unwrap(), width)
+            .render_line(&block.lines().next().unwrap().0, width)
             .into_iter()
             .next()
             .expect("block renders at least one line");
@@ -1941,15 +2030,21 @@ mod tests {
             .collect()
     }
 
+    /// The rendered texts of each finalized line of a block's content.
+    fn finalized_texts(content: &ChatBlockContent) -> Vec<String> {
+        content
+            .lines_finalized
+            .iter()
+            .map(|line| line.text.clone())
+            .collect()
+    }
+
     #[test]
     fn a_blank_line_splits_a_block_into_finalized_and_active() {
         let mut block = ChatBlockContent::default();
         let finalized = block.append("one\ntwo\n\nthree".to_string());
         assert!(finalized);
-        assert_eq!(
-            block.lines_finalized,
-            vec!["one".to_string(), "two".to_string(), String::new()]
-        );
+        assert_eq!(finalized_texts(&block), vec!["one", "two", ""]);
         assert_eq!(active_texts(&block), vec!["three".to_string()]);
     }
 
@@ -1964,14 +2059,11 @@ mod tests {
         });
 
         let content = &history.content.blocks[0];
-        assert_eq!(
-            content.content().lines_finalized,
-            vec!["streaming".to_string()]
-        );
+        assert_eq!(finalized_texts(content.content()), vec!["streaming"]);
         assert!(content.content().lines_active.is_empty());
 
         let user = &history.content.blocks[1];
-        assert_eq!(user.content().lines_finalized, vec!["next".to_string()]);
+        assert_eq!(finalized_texts(user.content()), vec!["next"]);
         assert!(user.content().lines_active.is_empty());
     }
 
@@ -1981,10 +2073,7 @@ mod tests {
         assert!(!content.lines_active.is_empty());
 
         content.finalize();
-        assert_eq!(
-            content.lines_finalized,
-            vec!["line one".to_string(), "line two".to_string()]
-        );
+        assert_eq!(finalized_texts(&content), vec!["line one", "line two"]);
         assert!(content.lines_active.is_empty());
     }
 
@@ -1998,7 +2087,7 @@ mod tests {
 
         history.finalize_all();
         let content = &history.content.blocks[0];
-        assert_eq!(content.content().lines_finalized, vec!["abc".to_string()]);
+        assert_eq!(finalized_texts(content.content()), vec!["abc"]);
         assert!(content.content().lines_active.is_empty());
     }
 
@@ -2031,5 +2120,119 @@ mod tests {
         history.set_layout(20, 3);
         let lines = history.render();
         assert_eq!(line_texts(&lines), vec!["hello", "", ""]);
+    }
+
+    #[test]
+    fn finalized_lines_render_their_markdown_styles() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "a **b** and *c*".into(),
+        });
+        history.finalize_all();
+
+        // The syntax is stripped from the stored line, and the register marks the regions
+        let content = &history.content.blocks[0].content();
+        assert_eq!(content.lines_finalized.len(), 1);
+        assert_eq!(content.lines_finalized[0].text, "a b and c");
+        assert_eq!(
+            content.lines_finalized[0].styles,
+            vec![
+                (2, MarkdownStyle::default().with(Effect::Bold)),
+                (3, MarkdownStyle::default()),
+                (8, MarkdownStyle::default().with(Effect::Italic))
+            ]
+        );
+
+        // The display line carries the regions as separate spans, over the block style
+        history.set_layout(20, 3);
+        let lines = history.render();
+        let line = &lines[0];
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "a b and c");
+        let span_styles: Vec<(String, Style)> = line
+            .spans
+            .iter()
+            .map(|span| (span.content.as_ref().to_string(), span.style))
+            .collect();
+        assert_eq!(
+            span_styles,
+            vec![
+                ("a ".to_string(), Style::default()),
+                ("b".to_string(), Style::default().bold()),
+                (" and ".to_string(), Style::default()),
+                ("c".to_string(), Style::default().italic())
+            ]
+        );
+    }
+
+    #[test]
+    fn fragment_starts_accounts_for_kept_leading_whitespace() {
+        // textwrap keeps a line’s leading whitespace in the first fragment, so the offsets must
+        // not assume it was dropped.
+        let line = "  hello world x";
+        let fragments: Vec<Cow<'_, str>> = textwrap::wrap(line, 8);
+        let texts: Vec<&str> = fragments.iter().map(|f| f.as_ref()).collect();
+        assert_eq!(texts, vec!["  hello", "world x"]);
+        assert_eq!(fragment_starts(line, &fragments), vec![0, 8]);
+    }
+
+    #[test]
+    fn indented_markdown_lines_render_when_wrapped() {
+        // Regression: a line with leading whitespace that wraps, with a style boundary in a later
+        // fragment, used to underflow in styled_spans().
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "  hello *world* x".into(),
+        });
+        history.finalize_all();
+
+        history.set_layout(8, 3);
+        let lines = history.render();
+        assert_eq!(line_texts(&lines), vec!["  hello", "world x", ""]);
+
+        let line = &lines[1];
+        let span_styles: Vec<(String, Style)> = line
+            .spans
+            .iter()
+            .map(|span| (span.content.as_ref().to_string(), span.style))
+            .collect();
+        assert_eq!(
+            span_styles,
+            vec![
+                ("world".to_string(), Style::default().italic()),
+                (" x".to_string(), Style::default())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_style_opening_a_line_survives_wrapping() {
+        let mut history = ChatHistory::new();
+        history.push(AgentUpdate::Content {
+            append: "*one two three".into(),
+        });
+        history.finalize_all();
+
+        // The register’s only breakpoint is at offset 0, so it precedes the start of every
+        // fragment but the first
+        history.set_layout(5, 3);
+        let lines = history.render();
+        let span_styles: Vec<(String, Style)> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| (span.content.as_ref().to_string(), span.style))
+            .collect();
+        assert_eq!(
+            span_styles,
+            vec![
+                ("one".to_string(), Style::default().italic()),
+                ("two".to_string(), Style::default().italic()),
+                ("three".to_string(), Style::default().italic())
+            ]
+        );
     }
 }
