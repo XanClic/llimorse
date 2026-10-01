@@ -125,6 +125,10 @@ enum ScrollPosition {
 /// The wrapped-line counts of a chat history, cached for a width
 #[derive(Debug, Default)]
 struct WrappedCache {
+    /// Set when the lines may have changed beyond the last one (a finalization rewrites
+    /// already-final lines), in which case a full re-wrap is needed
+    dirty: bool,
+
     /// The width the counts were computed for
     width: usize,
 
@@ -140,9 +144,11 @@ impl WrappedCache {
     /// where the lines have not changed.
     ///
     /// The history is append-only, and only its last logical line can change content (streaming),
-    /// so only the last existing line and any new lines need to be (re)wrapped.
+    /// so only the last existing line and any new lines need to be (re)wrapped. A finalization
+    /// rewrites already-final lines, which is flagged with `dirty` and triggers a full re-wrap.
     fn update(&mut self, history: &ChatHistoryContent, width: usize) {
-        if self.width != width {
+        if self.dirty || self.width != width {
+            self.dirty = false;
             self.width = width;
             self.line_lengths = history
                 .logical_lines()
@@ -160,7 +166,8 @@ impl WrappedCache {
         }
 
         if count < self.line_lengths.len() {
-            // The history shrank, which cannot happen; drop the stale counts
+            // The history shrank, which can only happen after a full re-wrap; drop the stale
+            // counts
             self.line_lengths.truncate(count);
         }
 
@@ -264,7 +271,13 @@ struct ChatHistory {
 
 /// Chat history data
 #[derive(Debug, Default)]
-struct ChatHistoryContent(Vec<ChatBlock>);
+struct ChatHistoryContent {
+    /// The blocks
+    blocks: Vec<ChatBlock>,
+
+    /// Set when a finalization changed lines that the wrap cache may already have counted
+    rewrap: bool,
+}
 
 /// A block in the chat with a single semantic
 #[derive(Debug)]
@@ -737,10 +750,9 @@ impl ui::UiState for TermUi {
                 self.queued_prompts.push_back(sanitized);
             }
             ui::Notification::AwaitingPrompt { response } => {
-                if let Some(main) = self.agents.get_mut(&AgentId::Main)
-                    && let Some(last_block) = main.history.content.last_block_mut()
-                {
-                    last_block.finalize();
+                // Finalize the main agent's active block, so the last paragraph is final
+                if let Some(main) = self.agents.get_mut(&AgentId::Main) {
+                    main.history.finalize_all();
                 }
                 self.processing = false;
                 self.notify_prompt_done(response);
@@ -1036,6 +1048,17 @@ impl ChatHistory {
     /// Push the given update into the history.
     fn push(&mut self, update: AgentUpdate) {
         self.content.push(update);
+        if self.content.take_rewrap() {
+            self.cache.dirty = true;
+        }
+    }
+
+    /// Finalize the last block of the history (e.g. when the prompt iteration completes).
+    fn finalize_all(&mut self) {
+        self.content.finalize_last();
+        if self.content.take_rewrap() {
+            self.cache.dirty = true;
+        }
     }
 
     /// Set the history pane width and height (in characters).
@@ -1206,10 +1229,12 @@ impl ChatHistoryContent {
             }
 
             AgentUpdate::Content { append } => {
-                if let Some(last) = self.0.last_mut()
+                if let Some(last) = self.blocks.last_mut()
                     && let ChatBlock::Content(block) = last
                 {
-                    block.append(append);
+                    if block.append(append) {
+                        self.rewrap = true;
+                    }
                     return; // no new block added, return immediately
                 }
 
@@ -1217,10 +1242,12 @@ impl ChatHistoryContent {
             }
 
             AgentUpdate::Reasoning { append } => {
-                if let Some(last) = self.0.last_mut()
+                if let Some(last) = self.blocks.last_mut()
                     && let ChatBlock::Reasoning(block) = last
                 {
-                    block.append(append);
+                    if block.append(append) {
+                        self.rewrap = true;
+                    }
                     return; // no new block added, return immediately
                 }
 
@@ -1252,10 +1279,29 @@ impl ChatHistoryContent {
             }
         };
 
-        if let Some(last_block) = self.last_block_mut() {
-            last_block.finalize();
+        // The previous block is done: finalize it, so its active lines become final
+        if let Some(last_block) = self.last_block_mut()
+            && last_block.finalize()
+        {
+            self.rewrap = true;
         }
-        self.0.push(new_block);
+        self.blocks.push(new_block);
+    }
+
+    /// Finalize the last block, if any, and report whether it changed.
+    fn finalize_last(&mut self) -> bool {
+        let changed = self.blocks.last_mut().is_some_and(|block| block.finalize());
+        if changed {
+            self.rewrap = true;
+        }
+        changed
+    }
+
+    /// Return and reset the rewrap flag.
+    fn take_rewrap(&mut self) -> bool {
+        let rewrap = self.rewrap;
+        self.rewrap = false;
+        rewrap
     }
 
     /// Return the logical lines (unwrapped) of the history, in order: the lines of each block,
@@ -1288,12 +1334,12 @@ impl ChatHistoryContent {
 
     /// Return all the blocks of the history, in order.
     fn blocks(&self) -> impl Iterator<Item = &ChatBlock> {
-        self.0.iter()
+        self.blocks.iter()
     }
 
     /// Return a mutable to the last (latest) block, if any
     fn last_block_mut(&mut self) -> Option<&mut ChatBlock> {
-        self.0.last_mut()
+        self.blocks.last_mut()
     }
 }
 
@@ -1374,8 +1420,10 @@ impl ChatBlock {
     }
 
     /// This block is done, so empty the active part out, and make it all finalized.
-    fn finalize(&mut self) {
-        self.content_mut().finalize();
+    ///
+    /// Return whether any lines were moved.
+    fn finalize(&mut self) -> bool {
+        self.content_mut().finalize()
     }
 }
 
@@ -1402,8 +1450,10 @@ impl<'a> Iterator for ChatBlockLineIterator<'a> {
 }
 
 impl ChatBlockContent {
-    /// Append `token` to this block
-    fn append(&mut self, token: String) {
+    /// Append `token` to this block.
+    ///
+    /// Return whether a finalization happened (a blank line was found and split off).
+    fn append(&mut self, token: String) -> bool {
         let full_string = format!("{}{token}", self.trailing_whitespace);
         let (iter, trailing_ws) = Self::split_up(&full_string);
 
@@ -1428,7 +1478,7 @@ impl ChatBlockContent {
 
         // Find an empty line; that’s where we split.
         let Some(split_index) = self.lines_active.iter().position(Vec::is_empty) else {
-            return;
+            return false;
         };
 
         // Note that split_index points to the empty line, and we need it to point after
@@ -1440,6 +1490,8 @@ impl ChatBlockContent {
             self.lines_finalized
                 .push(line.into_iter().map(|token| token.text).collect::<String>());
         }
+
+        true
     }
 
     /// Internal helper: Split up string by lines, and return trailing whitespace
@@ -1459,11 +1511,19 @@ impl ChatBlockContent {
     }
 
     /// This block is done, so empty the active part out, and make it all finalized.
-    fn finalize(&mut self) {
+    ///
+    /// Return whether any lines were moved.
+    fn finalize(&mut self) -> bool {
+        if self.lines_active.is_empty() {
+            return false;
+        }
+
         for line in self.lines_active.drain(..) {
             self.lines_finalized
                 .push(line.into_iter().map(|token| token.text).collect::<String>());
         }
+
+        true
     }
 }
 
@@ -1699,15 +1759,15 @@ mod tests {
         // Three blocks of one line each, plus the blank line between each pair.
         assert_eq!(history.content.logical_line_count(), 5);
 
-        let (text, style) = first_rendered_line(&history.content.0[0], 80);
+        let (text, style) = first_rendered_line(&history.content.blocks[0], 80);
         assert_eq!(text, "[call_1] bash: echo hi");
         assert_eq!(style.fg, Some(Color::Blue));
 
-        let (text, style) = first_rendered_line(&history.content.0[1], 80);
+        let (text, style) = first_rendered_line(&history.content.blocks[1], 80);
         assert_eq!(text, "=[bash/call_1]=> hi");
         assert_eq!(style.fg, Some(Color::Green));
 
-        let (text, style) = first_rendered_line(&history.content.0[2], 80);
+        let (text, style) = first_rendered_line(&history.content.blocks[2], 80);
         assert_eq!(text, "=[bash/call_1]=> command not found");
         assert_eq!(style.fg, Some(Color::Red));
         assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -1857,12 +1917,12 @@ mod tests {
             append: "hello".into(),
         });
 
-        assert!(agents.state[0].history.content.0.is_empty());
+        assert!(agents.state[0].history.content.blocks.is_empty());
         assert_eq!(
             agents.state[1].subagent_state.as_ref().unwrap().id,
             SubagentId::new(1)
         );
-        assert!(!agents.state[1].history.content.0.is_empty());
+        assert!(!agents.state[1].history.content.blocks.is_empty());
 
         // A dropped subagent must not be routable.
         assert!(
